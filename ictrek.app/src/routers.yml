@@ -1,0 +1,19 @@
+# =============================================================================
+# PhotoCraft — 前端导航路由
+# 平铺 page：单个入口直接进应用抽屉（与其他应用一致），无折叠分组。
+# =============================================================================
+
+router-type: flatten
+
+routers:
+  - id: photocraft
+    kind: page
+    title:
+      zh-CN: PhotoCraft
+      en: PhotoCraft
+    icon: lucide:image
+    order: 220
+    iframe-src: /app/com.ictrek.photocraft/?v=__APP_VERSION__
+    keep-alive: true
+    entry-point: true
+    embed: true

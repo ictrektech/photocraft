@@ -1,0 +1,67 @@
+id: com.ictrek.photocraft
+name:
+  zh-CN: PhotoCraft
+  en: PhotoCraft
+description:
+  zh-CN: 类 PS 的原生图像编辑器，浏览器版。图层、蒙版、通道、智能对象、CMYK / 16 位、PSD 读写与完整的 Photoshop 菜单与快捷键。
+  en: A Photoshop-like native image editor, running in the browser. Layers, masks, channels, smart objects, CMYK / 16-bit, PSD round-trips and Photoshop's menus and shortcuts.
+version: __APP_VERSION__
+author: ictrek
+category: [media, ai]
+icon: icon.png
+arch: [amd64, arm64]
+
+frontend:
+  enabled: true
+  basePath: /app/com.ictrek.photocraft
+
+platform:
+  version: ">=3.0.0"
+
+# 第 2 期（NAS 文件互通 + VOS 身份）已经预留：平台在安装时注册这个 public PKCE client，
+# 卸载时清理；应用通过同域 iframe 注入的 window.vos_platform 走 OIDC fastpath 取 token。
+# 第 0 期的 web 壳还用不到它，但先声明不影响现网行为（enable 缺省 true 才会注册）。
+oauth2:
+  client:
+    id: com.ictrek.photocraft
+    redirect_uris:
+      - https://app.vos-platform.internal/callback
+    grant_types:
+      - authorization_code
+      - refresh_token
+    response_types:
+      - code
+    scopes:
+      - openid
+      - profile
+      - email
+    pkce_required: true
+    token_endpoint_auth_method: none
+    access_token_ttl: 3600
+    refresh_token_ttl: 1209600
+
+# 站点是纯静态产物，镜像只是 nginx；档位只对应不同架构的 nginx 基础镜像，
+# 与 GPU / 编解码能力无关（渲染在浏览器里由 WebGPU / WebGL2 决定）。
+require-profiles: [amd, arm]
+
+profiles:
+  - name: amd
+    title:
+      zh-CN: AMD64
+      en: AMD64
+    description:
+      zh-CN: x86_64 主机。站点本身与架构无关，仅使用 amd64 的 nginx 基础镜像。
+      en: x86_64 hosts. The site itself is architecture-independent; only the nginx base image differs.
+    caps:
+      arch: amd64
+    conflicts: [arm]
+  - name: arm
+    title:
+      zh-CN: ARM64
+      en: ARM64
+    description:
+      zh-CN: ARM64 主机。站点本身与架构无关，仅使用 arm64 的 nginx 基础镜像。
+      en: ARM64 hosts. The site itself is architecture-independent; only the nginx base image differs.
+    caps:
+      arch: arm64
+    conflicts: [amd]

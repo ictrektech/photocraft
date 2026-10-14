@@ -1,0 +1,39 @@
+# Fidelity mode for `VOS_DEV_WEB=0 make vos-dev`: the exact site and the exact nginx configuration
+# the published image runs (dist/web + packaging/web/nginx.conf), on a workstation port, so the
+# platform's Traefik route can point at it. Traefik strips /app/com.ictrek.photocraft on the way in,
+# exactly as it does for the installed app, so what is tested here is what ships.
+#
+#   make vos-dev-web            # build/refresh dist/web (through the image's build stage)
+#   VOS_DEV_WEB=0 make vos-dev  # start this container and write the temporary Traefik route
+#
+# The trunk dev server (the default mode) needs no container at all.
+services:
+  web:
+    # The published runtime is nginx serving packaging/web/nginx.conf; this mirrors it.
+    image: __VOS_DEV_WEB_IMAGE__
+    container_name: photocraft-vos-dev-web
+    ports:
+      - "__VOS_DEV_DIST_PORT__:8080"
+    volumes:
+      # dist/web is written by `make vos-dev-web`.
+      - ../../dist/web:/usr/share/nginx/html:ro
+      # The config the PUBLISHED image serves: packaging/web/nginx.conf, with the IPv6 listener
+      # already removed, exactly as docker/Dockerfile.vos does when it builds. Mounted over
+      # /etc/nginx/nginx.conf so fidelity mode tests that file and not an approximation of it.
+      # It replaces the whole config, so the base image's /etc/nginx/conf.d is never read (our
+      # nginx.conf does not include it) and needs no mount.
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3

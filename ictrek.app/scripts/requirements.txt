@@ -1,0 +1,6 @@
+# Python deps for the VOS packaging scripts (package.sh / audit-package.sh).
+#
+# package.sh validates the rendered manifest/compose/routers YAML before tarring, and
+# .github/workflows/vos-release.yml installs this file before running it. audit-package.sh
+# degrades gracefully when PyYAML is missing, package.sh does not, so CI must install it.
+PyYAML==6.0.3

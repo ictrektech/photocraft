@@ -1,0 +1,197 @@
+name: VOS release
+
+# Publishing com.ictrek.photocraft: bumped by ictrek.app/scripts/update_version.sh, which commits
+# ictrek.app/VERSION and ictrek.app/UPSTREAM.yml, tags vos-photocraft-v<version> and pushes. The
+# images themselves are built and recorded in Feishu beforehand (docker/build_image.sh); this
+# workflow turns the recorded tags into the pull package and publishes it.
+#
+# Manual runs build a package with --dry-run image tags and publish nothing, which is how to check
+# the templates without touching the App Store.
+
+on:
+  push:
+    tags:
+      - "vos-photocraft-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: vos-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Package and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # package.sh validates the rendered YAML, so it needs PyYAML; the runner image does not
+      # guarantee it is importable from the interpreter setup-python selects.
+      - name: Install packaging dependencies
+        run: python3 -m pip install --disable-pip-version-check -r ictrek.app/scripts/requirements.txt
+
+      - name: Read the version from the tag
+        id: version
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/vos-photocraft-v* ]]; then
+            version="${GITHUB_REF_NAME#vos-photocraft-v}"
+          else
+            version="$(tr -d '[:space:]' < ictrek.app/VERSION)"
+            echo "manual run: using the version in the working tree (${version})"
+          fi
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-vos\.[0-9]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::${version} is not <core>-vos.<n>[+up<base>]"
+            exit 1
+          fi
+          printf 'value=%s\n' "${version}" >> "$GITHUB_OUTPUT"
+
+      - name: The tag and ictrek.app/VERSION must agree
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          file="$(tr -d '[:space:]' < ictrek.app/VERSION)"
+          if [[ "${file}" != "${{ steps.version.outputs.value }}" ]]; then
+            echo "::error::ictrek.app/VERSION is ${file}, the tag says ${{ steps.version.outputs.value }}"
+            exit 1
+          fi
+
+      - name: Scope guard (no upstream file changed)
+        run: bash ictrek.app/scripts/verify-scope.sh
+
+      - name: Feishu credentials
+        if: github.ref_type == 'tag'
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${FEISHU_APP_ID:-}" || -z "${FEISHU_APP_SECRET:-}" ]]; then
+            echo "::warning::FEISHU_APP_ID/FEISHU_APP_SECRET are not configured; the package cannot be built from recorded image tags"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json, os, pathlib
+          path = pathlib.Path.home() / ".feishu.components.json"
+          path.write_text(json.dumps({
+              "feishu_app_id": os.environ["FEISHU_APP_ID"],
+              "feishu_app_secret": os.environ["FEISHU_APP_SECRET"],
+          }))
+          path.chmod(0o600)
+          print("wrote", path)
+          PY
+
+      - name: Build the pull package
+        env:
+          FEISHU_SPREADSHEET_TOKEN: ${{ secrets.FEISHU_SPREADSHEET_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]] && [[ -r "${HOME}/.feishu.components.json" ]]; then
+            ./ictrek.app/scripts/package.sh --version "${{ steps.version.outputs.value }}"
+          else
+            echo "::notice::dry-run package: placeholder image tags, nothing will be published"
+            ./ictrek.app/scripts/package.sh --dry-run --version "${{ steps.version.outputs.value }}"
+          fi
+          ls -l ictrek.app/dist/
+
+      - name: Publish the GitHub release (tag runs only)
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.value }}"
+          package="ictrek.app/dist/photocraft_${version}_pull.tar"
+          # update_version.sh pushes only the trigger tag (vos-photocraft-v<version>); the public
+          # release tag does not exist yet, and --verify-tag insists that it does.
+          public_tag="v${version}"
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${public_tag}" >/dev/null 2>&1; then
+            git tag "${public_tag}" "${GITHUB_SHA}"
+            git push origin "${public_tag}"
+          fi
+          # Never publish a package that still carries placeholder tags (a partially configured run).
+          if tar xOf "${package}" app.tar.gz | tar xzO .env | grep -q DRY_RUN_DO_NOT_INSTALL; then
+            echo "::error::the package holds dry-run image tags; publish the images and re-run"
+            exit 1
+          fi
+          notes="$(mktemp)"
+          {
+            echo "Pull-mode VOS app package for com.ictrek.photocraft."
+            echo
+            echo "Upstream base:"
+            sed -n 's/^\(core\|repo\|ref\|fork_build\):/  \1:/p' ictrek.app/UPSTREAM.yml
+            echo
+            echo "Image tags (from the release spreadsheet):"
+            sed -n 's/^PHOTOCRAFT_WEB_\([A-Z]*\)_IMAGE=/  \1 /p' <(tar xOf "${package}" app.tar.gz | tar xzO .env)
+            echo
+            echo "Install: \`vos-platform-cli app install-local --package-path photocraft_${version}_pull.tar\`"
+          } > "${notes}"
+          if gh release view "${public_tag}" >/dev/null 2>&1; then
+            gh release upload "${public_tag}" "${package}" --clobber
+            gh release edit "${public_tag}" --notes-file "${notes}"
+          else
+            gh release create "${public_tag}" "${package}" \
+              --verify-tag --draft \
+              --title "PhotoCraft VOS ${version}" --notes-file "${notes}"
+          fi
+
+      - name: Upload to the VOS App Store (tag runs only)
+        if: github.ref_type == 'tag'
+        env:
+          APPSTORE_IP: ${{ secrets.APPSTORE_IP }}
+          APPSTORE_TOKEN: ${{ secrets.APPSTORE_TOKEN }}
+          APPSTORE_HOST_KEY: ${{ secrets.APPSTORE_HOST_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${APPSTORE_IP:-}" || -z "${APPSTORE_TOKEN:-}" ]]; then
+            echo "::warning::APPSTORE_IP/APPSTORE_TOKEN are not configured; the package was built and released but not uploaded"
+            exit 0
+          fi
+          version="${{ steps.version.outputs.value }}"
+          package="ictrek.app/dist/photocraft_${version}_pull.tar"
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          # Pin the store's host key from a secret when it is set; otherwise fall back to keyscan,
+          # which is what the sibling apps do (so an unconfigured repo can still release). The
+          # tunnel only ever reaches this one host, so pinning removes the MITM window.
+          if [[ -n "${APPSTORE_HOST_KEY:-}" ]]; then
+            printf '%s\n' "${APPSTORE_HOST_KEY}" > "$HOME/.ssh/known_hosts"
+          else
+            echo "::warning::APPSTORE_HOST_KEY is not set; trusting a freshly scanned key"
+            ssh-keyscan -H -p 32222 "${APPSTORE_IP}" >> "$HOME/.ssh/known_hosts" 2>/dev/null
+          fi
+          askpass="$RUNNER_TEMP/vos-appstore-askpass.sh"
+          printf '#!/bin/sh\nprintf "%%s\\n" "$APPSTORE_TOKEN"\n' > "$askpass"
+          chmod 700 "$askpass"
+          export SSH_ASKPASS="$askpass" SSH_ASKPASS_REQUIRE=force DISPLAY=:0
+          socket="$RUNNER_TEMP/vos-appstore.sock"
+          trap 'ssh -S "$socket" -O exit -p 32222 tunneluser@"${APPSTORE_IP}" >/dev/null 2>&1 || true' EXIT
+          ssh -M -S "$socket" -f -N -L 18899:127.0.0.1:18090 -p 32222 \
+            -o BatchMode=no -o ExitOnForwardFailure=yes \
+            -o PreferredAuthentications=password -o PubkeyAuthentication=no \
+            tunneluser@"${APPSTORE_IP}" </dev/null
+          ready=false
+          for _ in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:18899/api/health" >/dev/null; then ready=true; break; fi
+            sleep 1
+          done
+          [[ "${ready}" == true ]] || { echo "::error::the App Store tunnel never became ready"; exit 1; }
+          curl -fsS -F "package=@${package}" -F "force=true" -F "channel=stable" \
+            "http://127.0.0.1:18899/api/appstore/apps" | tee /tmp/appstore.json
+          python3 - <<'PY'
+          import json
+          data = json.load(open("/tmp/appstore.json"))
+          if data.get("code") not in (0, None):
+              raise SystemExit("the App Store refused the package: " + str(data))
+          print("uploaded")
+          PY

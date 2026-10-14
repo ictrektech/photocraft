@@ -1,0 +1,40 @@
+# Traefik file-provider route written by scripts/vos-dev.sh: sends /app/com.ictrek.photocraft
+# to this workstation instead of the app installed on the platform. Deleting this file makes the
+# platform serve its own copy again; Traefik reloads file-provider config within a second or two.
+#
+# __HOST__ and __PORT__ are substituted by the script (the trunk dev server, or nginx in
+# fidelity mode when VOS_DEV_WEB=0).
+http:
+  routers:
+    photocraft-dev-web:
+      rule: "PathPrefix(`/app/com.ictrek.photocraft`)"
+      service: photocraft-dev-web
+      priority: 3000
+      middlewares:
+        - photocraft-dev-marker
+        - photocraft-dev-strip
+    photocraft-dev-api:
+      rule: "PathPrefix(`/api/com.ictrek.photocraft`)"
+      service: photocraft-dev-web
+      priority: 3000
+      middlewares:
+        - photocraft-dev-strip
+  middlewares:
+    # Same prefix stripping the installed app's route does (docker-compose.yml labels), so the dev
+    # server sees exactly the requests the shipped nginx configuration expects.
+    photocraft-dev-strip:
+      stripPrefix:
+        prefixes:
+          - /app/com.ictrek.photocraft
+          - /api/com.ictrek.photocraft
+    # Lets any client tell whether it is talking to this dev server or the installed app:
+    #   curl -sI http://127.0.0.1:1182/app/com.ictrek.photocraft/ | grep -i x-photocraft-dev
+    photocraft-dev-marker:
+      headers:
+        customResponseHeaders:
+          X-Photocraft-Dev: "1"
+  services:
+    photocraft-dev-web:
+      loadBalancer:
+        servers:
+          - url: "http://__HOST__:__PORT__"

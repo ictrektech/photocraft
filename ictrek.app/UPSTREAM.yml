@@ -1,0 +1,15 @@
+# Where this VOS build's core version comes from. Written by scripts/update_version.sh.
+#
+# core        the upstream PhotoCraft version this build is based on (Cargo.toml
+#             [workspace.package] version, upstream tag v<core>)
+# repo/ref    the upstream repository and the exact commit the base was taken from
+# fork_build  which VOS build of this core: 0.8.2-vos.<fork_build>
+# core_bumped true when we raised the core version ourselves, so the upstream base is
+#             older than the core in VERSION (then core_base names that upstream core
+#             and VERSION carries it as SemVer build metadata, +up<core_base>)
+core: "0.8.2"
+repo: storytold/photocraft
+ref: "d43db3e1"
+base_sha: "d43db3e1"
+fork_build: 1
+core_bumped: false

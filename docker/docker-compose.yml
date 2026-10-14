@@ -1,0 +1,43 @@
+# PhotoCraft web (wasm) served by nginx — community self-hosting recipe.
+#
+#   docker compose -f docker/docker-compose.yml up --build
+#   → http://localhost:8080/
+#
+# The build context is the repository root (the Dockerfile COPYs the whole workspace),
+# so run from anywhere with -f docker/docker-compose.yml, or cd into this directory and
+# use `docker compose up --build`.
+#
+# Source of truth for the build: docker/Dockerfile.vos (see also packaging/web/README.md).
+
+services:
+  photocraft-web:
+    build:
+      context: ..
+      # The VOS image recipe: trunk and wasm-bindgen-cli are installed from crates.io
+      # instead of downloaded from GitHub releases (blocked on some networks), and
+      # rustup/cargo can be pointed at mirrors. Keep WASM_BINDGEN_VERSION there in sync
+      # with Cargo.lock.
+      dockerfile: docker/Dockerfile.vos
+      # Optional provenance shown in About and --version; left empty it reports a dev build.
+      # Uncomment to stamp the current commit:
+      # args:
+      #   PHOTOCRAFT_BUILD_SHA: ${PHOTOCRAFT_BUILD_SHA:-}
+      #   PHOTOCRAFT_BUILD_DATE: ${PHOTOCRAFT_BUILD_DATE:-}
+      args:
+        # static.rust-lang.org is blocked on some networks (rustup target add fails with
+        # a TCP connect timeout); this mirror works and must carry the same toolchain
+        # version as RUST_VERSION. Override with e.g.
+        #   RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rustup docker compose up --build
+        RUSTUP_DIST_SERVER: ${RUSTUP_DIST_SERVER:-https://mirrors.tuna.tsinghua.edu.cn/rustup}
+    image: photocraft-web:local
+    container_name: photocraft-web
+    ports:
+      - "${PHOTOCRAFT_WEB_PORT:-48040}:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
