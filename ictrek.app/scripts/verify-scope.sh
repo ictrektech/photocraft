@@ -27,6 +27,7 @@ WHITELIST=(
   "docs/vos-integration.md"
   "apps/photocraft-web/Trunk.vos-dev.toml"
   "ATTRIBUTION.md"
+  ".pre-commit-config.yaml"
   ".gitignore"
 )
 
