@@ -1,0 +1,34 @@
+# Pre-commit checks for the VOS fork. Keep this list tiny: it must finish in seconds so people
+# actually keep it enabled. Heavy checks (web build, wasm size gate, scope guard) run in vos-ci
+# on every push; this only catches the mechanical errors before they reach CI.
+#
+# Install:  pip install pre-commit && pre-commit install
+# Run all:  pre-commit run --all-files
+
+repos:
+  # The same two hooks as the CI "scope" job, so a shellcheck failure never has to make a
+  # round trip through Actions.
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+        name: shellcheck (ictrek.app scripts)
+        files: ^ictrek\.app/scripts/.*\.sh$
+        args: [-x]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      # Workflow YAML is the fork's own CI; a syntax slip breaks every push until fixed.
+      - id: check-yaml
+        name: yaml (workflows, ictrek.app)
+        files: ^(\.github/workflows|ictrek\.app)/.*\.ya?ml$
+      # release drives packaging scripts from repo root; CRLF in bash breaks them on Linux.
+      - id: end-of-file-fixer
+        files: ^ictrek\.app/
+      - id: trailing-whitespace
+        files: ^ictrek\.app/
+      # Large files never belong here: the wasm/zip artifacts go to ictrek.app/dist (gitignored),
+      # and corpus files must never be committed.
+      - id: check-added-large-files
+        args: [--maxkb=1024]

@@ -189,7 +189,7 @@ PY
 
 # Prints "<repository>:<tag>" for one architecture, or nothing when no sheet carries an entry yet.
 latest_image() {
-  local token="$1" sheets="$2" sheet_title sheet_id header column repo response tag
+  local token="$1" sheets="$2" sheet_title sheet_id header column response tag
   local candidates=()
   IFS=',' read -ra candidates <<< "${sheets}"
   for sheet_title in "${candidates[@]}"; do

@@ -211,8 +211,9 @@ git -C "${REPO_ROOT}" merge-base --is-ancestor "${ref}" HEAD 2>/dev/null \
 base_sha="$(git -C "${REPO_ROOT}" merge-base HEAD "${UPSTREAM_BRANCH}" 2>/dev/null | cut -c1-9 || true)"
 [[ -n "${base_sha}" ]] || base_sha="${ref}"
 
-git -C "${REPO_ROOT}" diff --quiet && git -C "${REPO_ROOT}" diff --cached --quiet \
-  || die "worktree is not clean; commit code changes before releasing"
+if ! (git -C "${REPO_ROOT}" diff --quiet && git -C "${REPO_ROOT}" diff --cached --quiet); then
+  die "worktree is not clean; commit code changes before releasing"
+fi
 
 trigger_tag="${TAG_PREFIX}${version}"
 public_tag="v${version}"
