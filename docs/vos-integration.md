@@ -294,6 +294,18 @@ git switch main && git rebase mirror
 ./ictrek.app/scripts/update_version.sh --upstream <new upstream version>
 ```
 
+The sync rebase brings upstream's own `.github/workflows/*` back in (they are part of the
+upstream tree). Three defences keep the fork's CI light:
+
+1. **Prune commit**: the VOS series starts with a commit that deletes every upstream workflow.
+   The rebase replays it and deletes whatever came back.
+2. **rerere**: enable once with `git config rerere.enabled true`. When upstream *modifies* a
+   workflow file, the prune commit hits a delete/modify conflict; resolve it once (keep the
+   deletion) and rerere resolves it automatically on every later sync.
+3. **CI gate**: `vos-ci.yml` has a "No foreign workflows" step that fails when any workflow other
+   than `vos-release.yml`/`vos-ci.yml` exists — so a workflow rerere has not seen yet turns CI
+   red instead of silently running upstream's heavy jobs.
+
 Keeping the upstream mirror on a separate branch is what makes the sync a rebase instead of a merge:
 `main` stays linear, so `mirror..main` is exactly "our changes" and the scope gate can diff them.
 Pinning `mirror` to a tag rather than to `upstream/main` is deliberate: a release tag is a point

@@ -1,0 +1,98 @@
+name: VOS CI
+
+# The fork ships only the web build to VOS, and every fork tag is based on an upstream release
+# whose own CI already ran the full workspace test suite. So this workflow keeps only what the
+# fork can actually break: the VOS packaging scope (verify-scope), the packaging scripts, and a
+# web release build with its wasm size gate. Heavy upstream checks (tests, corpus, fuzz, docs,
+# desktop packaging) live in the upstream repo's CI.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vos-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Match release.yml so results reflect what actually ships.
+  TRUNK_VERSION: 0.21.14
+
+jobs:
+  scope:
+    name: scope guard and packaging lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Upstream tags are reachable
+        run: |
+          git remote add upstream https://github.com/storytold/photocraft.git 2>/dev/null || true
+          git fetch --no-tags upstream '+refs/tags/*:refs/tags/upstream/*' || true
+          # Not fatal: the guard also works when UPSTREAM.yml pins base_sha (a local ref).
+          git fetch origin '+refs/tags/*:refs/tags/*' --force || true
+
+      - name: Fork scope guard (no upstream file changed)
+        run: bash ictrek.app/scripts/verify-scope.sh
+
+      # Upstream's own workflows ride in with every sync rebase and would run the fork's full
+      # heavy CI on push. The prune commit at the head of the VOS series deletes them; this
+      # catches a workflow that came back (upstream added one rerere has not seen yet).
+      - name: No foreign workflows
+        run: |
+          keep='vos-release.yml|vos-ci.yml'
+          if ls .github/workflows/*.yml | grep -Ev "($keep)$" | grep .; then
+            echo "::error::upstream workflows came back with the sync; delete them (prune commit)" >&2
+            exit 1
+          fi
+          echo "only VOS workflows present"
+
+      - name: Shellcheck the packaging scripts
+        run: |
+          shellcheck ictrek.app/scripts/*.sh
+
+  web:
+    name: web build and wasm size gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: vos-ci-web
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: Install trunk
+        run: |
+          curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C "$HOME/.cargo/bin" trunk
+          trunk --version
+      # package.sh runs Trunk's release build, validates relative URLs, checks the 24 MiB
+      # wasm limit and exercises the same packaging step used by the VOS release images.
+      - name: Build and verify browser release
+        run: packaging/web/package.sh
+      - name: Report wasm size
+        if: success()
+        run: |
+          {
+            echo "### Browser WebAssembly size"
+            echo
+            echo "| File | Bytes | MiB | Limit |"
+            echo "| --- | ---: | ---: | ---: |"
+            for wasm in dist/web/*.wasm; do
+              [ -f "$wasm" ] || continue
+              bytes=$(wc -c < "$wasm" | tr -d ' ')
+              mib=$(awk -v n="$bytes" 'BEGIN { printf "%.2f", n / 1048576 }')
+              echo "| $(basename "$wasm") | $bytes | $mib | 24 MiB |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"

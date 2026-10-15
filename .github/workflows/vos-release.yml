@@ -112,17 +112,18 @@ jobs:
           set -euo pipefail
           version="${{ steps.version.outputs.value }}"
           package="ictrek.app/dist/photocraft_${version}_pull.tar"
+          # Never publish a package that still carries placeholder tags (a partially configured
+          # run). Check before pushing the public tag so a failed run leaves no dangling tag.
+          if tar xOf "${package}" app.tar.gz | tar xzO .env | grep -q DRY_RUN_DO_NOT_INSTALL; then
+            echo "::error::the package holds dry-run image tags; publish the images and re-run"
+            exit 1
+          fi
           # update_version.sh pushes only the trigger tag (vos-photocraft-v<version>); the public
           # release tag does not exist yet, and --verify-tag insists that it does.
           public_tag="v${version}"
           if ! git ls-remote --exit-code --tags origin "refs/tags/${public_tag}" >/dev/null 2>&1; then
             git tag "${public_tag}" "${GITHUB_SHA}"
             git push origin "${public_tag}"
-          fi
-          # Never publish a package that still carries placeholder tags (a partially configured run).
-          if tar xOf "${package}" app.tar.gz | tar xzO .env | grep -q DRY_RUN_DO_NOT_INSTALL; then
-            echo "::error::the package holds dry-run image tags; publish the images and re-run"
-            exit 1
           fi
           notes="$(mktemp)"
           {

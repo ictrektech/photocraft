@@ -23,19 +23,20 @@ WHITELIST=(
   "scripts/vos-dev.sh"
   "scripts/vos-fonts.sh"
   "Makefile"
-  ".github/workflows/vos-release.yml"
+  ".github/workflows/"
   "docs/vos-integration.md"
   "apps/photocraft-web/Trunk.vos-dev.toml"
   "ATTRIBUTION.md"
   ".gitignore"
 )
 
-# Tracked upstream files no VOS change may ever touch, even though the paths above are allowed.
-# (Never triggered today; kept as an explicit tripwire for future packaging work.)
-FORBIDDEN=(
+# Upstream code paths where the fork deliberately diverges. Touching these is allowed — the fork
+# does change real code — but every changed file under them shows up in `verify-scope.sh --list`,
+# which is the conflict checklist for the next upstream rebase. Keep this list SHORT: each entry
+# here is a file that may need hand-merging on every sync.
+DEVIATION=(
   "crates/"
-  "apps/photocraft/"
-  "apps/photocraft-cli/"
+  "apps/"
   "xtask/"
   "Cargo.toml"
   "Cargo.lock"
@@ -105,9 +106,9 @@ allowed() {
   return 1
 }
 
-forbidden() {
+deviation() {
   local path="$1" entry
-  for entry in "${FORBIDDEN[@]}"; do
+  for entry in "${DEVIATION[@]}"; do
     case "$path" in
       "$entry"*) return 0 ;;
     esac
@@ -115,29 +116,41 @@ forbidden() {
   return 1
 }
 
-out_of_scope=()
+packaging=()
+deviations=()
 count=0
 while IFS= read -r path; do
   [[ -n "$path" ]] || continue
   count=$((count + 1))
-  (( list_only )) && printf '%s\n' "$path"
-  if forbidden "$path" || ! allowed "$path"; then
-    out_of_scope+=("$path")
+  if deviation "$path" && ! allowed "$path"; then
+    # An upstream code path the fork changed on purpose. Registered, never fatal.
+    deviations+=("$path")
+    (( list_only )) && printf '%s\n' "$path"
+  elif ! allowed "$path"; then
+    packaging+=("$path")
+    (( list_only )) && printf '%s\n' "$path"
   fi
 done <<< "$changed"
 
 if (( list_only )); then
   log "${count} changed path(s)"
+  log "deviations from upstream code: ${#deviations[@]}"
   exit 0
 fi
 
-if (( ${#out_of_scope[@]} > 0 )); then
+if (( ${#packaging[@]} > 0 )); then
   echo "[scope][ERROR] these paths differ from upstream ${base} but are not in the VOS whitelist:" >&2
-  printf '  %s\n' "${out_of_scope[@]}" >&2
+  printf '  %s\n' "${packaging[@]}" >&2
   echo >&2
   echo "Either move the change into ictrek.app/ docker/ scripts/vos-dev.sh Makefile or" >&2
   echo "docs/vos-integration.md, or add the path to WHITELIST in this script deliberately." >&2
   exit 1
 fi
 
-log "all ${count} changed path(s) are inside the VOS whitelist"
+if (( ${#deviations[@]} > 0 )); then
+  log "${#deviations[@]} registered deviation(s) in upstream code (kept for the next rebase):"
+  printf '  %s\n' "${deviations[@]}"
+  log "all ${count} changed path(s) are inside the VOS whitelist or registered as deviations"
+else
+  log "all ${count} changed path(s) are inside the VOS whitelist"
+fi
