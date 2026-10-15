@@ -8,27 +8,32 @@
 # use `docker compose up --build`.
 #
 # Source of truth for the build: docker/Dockerfile.vos (see also packaging/web/README.md).
+#
+# docker/Dockerfile.vos starts FROM the toolchain image built by docker/build_toolchain.sh (Rust +
+# wasm32 target + trunk + wasm-bindgen-cli + wasm-opt). That image is not on Docker Hub: build and
+# publish it once with docker/build_toolchain.sh, or point TOOLCHAIN_IMAGE at a locally tagged one.
 
 services:
   photocraft-web:
     build:
       context: ..
-      # The VOS image recipe: trunk and wasm-bindgen-cli are installed from crates.io
-      # instead of downloaded from GitHub releases (blocked on some networks), and
-      # rustup/cargo can be pointed at mirrors. Keep WASM_BINDGEN_VERSION there in sync
-      # with Cargo.lock.
+      # The VOS image recipe: trunk, wasm-bindgen-cli and wasm-opt come from the toolchain image
+      # instead of being compiled or downloaded here (GitHub is blocked on some networks), and cargo
+      # uses the Tsinghua crates.io mirror. Keep WASM_BINDGEN_VERSION in sync with Cargo.lock and
+      # TRUNK_VERSION with .github/workflows/ci.yml / release.yml: every version below, plus the two
+      # network knobs, is part of the toolchain tag (docker/toolchain_tag.sh).
       dockerfile: docker/Dockerfile.vos
-      # Optional provenance shown in About and --version; left empty it reports a dev build.
-      # Uncomment to stamp the current commit:
-      # args:
-      #   PHOTOCRAFT_BUILD_SHA: ${PHOTOCRAFT_BUILD_SHA:-}
-      #   PHOTOCRAFT_BUILD_DATE: ${PHOTOCRAFT_BUILD_DATE:-}
       args:
-        # static.rust-lang.org is blocked on some networks (rustup target add fails with
-        # a TCP connect timeout); this mirror works and must carry the same toolchain
-        # version as RUST_VERSION. Override with e.g.
-        #   RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rustup docker compose up --build
-        RUSTUP_DIST_SERVER: ${RUSTUP_DIST_SERVER:-https://mirrors.tuna.tsinghua.edu.cn/rustup}
+        # Pin the toolchain explicitly, so compose does not have to guess the tag from the version
+        # ARGs below. Override with e.g.
+        #   TOOLCHAIN_IMAGE=photocraft-toolchain:local docker compose up --build
+        TOOLCHAIN_IMAGE: ${TOOLCHAIN_IMAGE:-}
+        RUST_VERSION: ${RUST_VERSION:-1.99}
+        TRUNK_VERSION: ${TRUNK_VERSION:-0.21.14}
+        WASM_BINDGEN_VERSION: ${WASM_BINDGEN_VERSION:-0.2.129}
+        WASM_OPT_VERSION: ${WASM_OPT_VERSION:-version_123}
+        CARGO_REGISTRY_MIRROR: ${CARGO_REGISTRY_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/}
+        GITHUB_ACCELERATOR: ${GITHUB_ACCELERATOR:-https://gh-proxy.com/}
     image: photocraft-web:local
     container_name: photocraft-web
     ports:

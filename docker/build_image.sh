@@ -6,12 +6,15 @@
 #   docker/build_image.sh --no-push --no-feishu # local build only
 #   docker/build_image.sh --tag-suffix r2       # second build of the same commit on the same day
 #
-# Tags, following the VAI convention (see ../nowen-video/build_image.sh):
-#   main tag     <arch>_<YYYYMMDD>_<short sha>     what the Feishu sheet records and package.sh reads
-#   release tag  <VERSION>-<amd64|arm64>           human-readable, e.g. 0.8.2-vos.1-amd64
+# One tag, following the VAI convention (see ../nowen-video/build_image.sh):
+#   <arch>_<YYYYMMDD>_<short sha>[-r<N>]     what the Feishu sheet records and package.sh reads
 #
-# The version is NOT part of the main tag on purpose: the tag says which commit and when, the
-# release tag says which release, and the image labels say which upstream base.
+# The version is deliberately NOT part of the tag: the tag says which commit and when, while the
+# release it belongs to lives in the org.opencontainers.image.version label, in ictrek.app/VERSION
+# and in ictrek.app/UPSTREAM.yml. A second <version>-<arch> tag used to be pushed as a
+# "human-readable" alias; nothing consumed it (package.sh and audit-package.sh both validate the
+# main tag against TAG_RE, which rejects that form), and it silently overwrote itself whenever
+# --tag-suffix was used, so a second build of the same day could not be pulled by version.
 set -euo pipefail
 
 REGISTRY="${REGISTRY:-swr.cn-southwest-2.myhuaweicloud.com}"
@@ -28,6 +31,17 @@ VERSION_FILE="${ROOT_DIR}/ictrek.app/VERSION"
 UPSTREAM_FILE="${ROOT_DIR}/ictrek.app/UPSTREAM.yml"
 DOCKERFILE="docker/Dockerfile.vos"
 
+# The toolchain base image (docker/Dockerfile.toolchain) supplies Rust, the wasm32 target, trunk,
+# wasm-bindgen-cli and wasm-opt, so this build compiles none of them. Keep these defaults in sync
+# with docker/Dockerfile.toolchain; the tag that identifies the image is computed by
+# docker/toolchain_tag.sh, which all three scripts call so they cannot drift apart.
+RUST_VERSION="${RUST_VERSION:-1.99}"
+TRUNK_VERSION="${TRUNK_VERSION:-0.21.14}"
+WASM_BINDGEN_VERSION="${WASM_BINDGEN_VERSION:-0.2.129}"
+WASM_OPT_VERSION="${WASM_OPT_VERSION:-version_123}"
+CARGO_REGISTRY_MIRROR="${CARGO_REGISTRY_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/}"
+GITHUB_ACCELERATOR="${GITHUB_ACCELERATOR:-https://gh-proxy.com/}"
+
 ARCH=""
 PUSH=1
 FEISHU=1
@@ -42,7 +56,7 @@ usage() {
 Usage: docker/build_image.sh [--arch amd|arm] [--tag-suffix S] [--sheet S]... [--no-push] [--no-feishu]
 
   --arch amd|arm     target architecture (default: the build host's)
-  --tag-suffix S     append -S to the main tag (a second build of the same commit the same day)
+  --tag-suffix S     append -S to the tag (a second build of the same commit the same day)
   --sheet S          Feishu sheet to record into (default: the sheets for the target architecture)
   --no-push          build and tag locally, do not push
   --no-feishu        do not read credentials or write to the sheet
@@ -96,13 +110,17 @@ case "${ARCH}" in
   amd) DOCKER_ARCH="amd64" ;;
   arm) DOCKER_ARCH="arm64" ;;
 esac
-# A Docker tag allows [A-Za-z0-9_.-] only, so SemVer build metadata (+up0.8.2, set when we raised
-# the core ourselves) has to come off here. It is not lost: the full version stays in the
-# org.opencontainers.image.version label and in ictrek.app/UPSTREAM.yml.
-TAG_VERSION="${VERSION%%+*}"
-RELEASE_TAG="${TAG_VERSION}-${DOCKER_ARCH}"
 MAIN_IMAGE="${IMAGE_REPO}:${MAIN_TAG}"
-RELEASE_IMAGE="${IMAGE_REPO}:${RELEASE_TAG}"
+
+TOOLCHAIN_REPO="${PHOTOCRAFT_TOOLCHAIN_IMAGE_REPO:-swr.cn-southwest-2.myhuaweicloud.com/ictrek/photocraft-toolchain}"
+TOOLCHAIN_TAG="$(RUST_VERSION="${RUST_VERSION}" \
+                 TRUNK_VERSION="${TRUNK_VERSION}" \
+                 WASM_BINDGEN_VERSION="${WASM_BINDGEN_VERSION}" \
+                 WASM_OPT_VERSION="${WASM_OPT_VERSION}" \
+                 CARGO_REGISTRY_MIRROR="${CARGO_REGISTRY_MIRROR}" \
+                 GITHUB_ACCELERATOR="${GITHUB_ACCELERATOR}" \
+                 bash "${ROOT_DIR}/docker/toolchain_tag.sh" "${DOCKER_ARCH}")"
+TOOLCHAIN_IMAGE="${TOOLCHAIN_REPO}:${TOOLCHAIN_TAG}"
 
 # Upstream provenance for the image labels (ictrek.app/UPSTREAM.yml).
 UPSTREAM_CORE=""
@@ -129,10 +147,24 @@ UPSTREAM_LABEL="storytold/photocraft@${UPSTREAM_REF:-unknown}"
 
 log "version ${VERSION} (upstream ${UPSTREAM_CORE:-unknown} @ ${UPSTREAM_REF:-unknown})"
 log "arch ${ARCH} (${DOCKER_ARCH}) host ${host_arch}"
-log "tags ${MAIN_TAG} and ${RELEASE_TAG}"
+log "tags ${MAIN_TAG}"
+log "toolchain ${TOOLCHAIN_IMAGE}"
+
+# Fail before a long build when the toolchain for this architecture is not available: the build
+# would otherwise stop with an opaque "failed to resolve source metadata" pull error. Accepts a
+# locally tagged image too, which is what a --no-push docker/build_toolchain.sh leaves behind.
+if ! docker image inspect "${TOOLCHAIN_IMAGE}" >/dev/null 2>&1 \
+   && ! docker manifest inspect "${TOOLCHAIN_IMAGE}" >/dev/null 2>&1; then
+  die "toolchain image ${TOOLCHAIN_IMAGE} is neither local nor in the registry.
+  Build and publish it once (on an ${DOCKER_ARCH} host -- SWR rejects multi-arch index pushes):
+      RUST_VERSION=${RUST_VERSION} TRUNK_VERSION=${TRUNK_VERSION} \\
+        WASM_BINDGEN_VERSION=${WASM_BINDGEN_VERSION} WASM_OPT_VERSION=${WASM_OPT_VERSION} \\
+        docker/build_toolchain.sh"
+fi
 
 build_args=(
   --file "${DOCKERFILE}"
+  --build-arg "TOOLCHAIN_IMAGE=${TOOLCHAIN_IMAGE}"
   --build-arg "PHOTOCRAFT_BUILD_SHA=${GIT_SHA}"
   --build-arg "PHOTOCRAFT_BUILD_DATE=$(date -u +%F)"
   --build-arg "PHOTOCRAFT_VOS_VERSION=${VERSION}"
@@ -142,7 +174,6 @@ build_args=(
   --label "org.opencontainers.image.created=${BUILD_ISO}"
   --label "com.ictrek.photocraft.upstream=${UPSTREAM_LABEL}"
   -t "${MAIN_IMAGE}"
-  -t "${RELEASE_IMAGE}"
 )
 
 if [[ "${ARCH}" == "${host_arch}" ]]; then
@@ -156,12 +187,10 @@ else
 fi
 
 if (( PUSH )); then
-  for image in "${MAIN_IMAGE}" "${RELEASE_IMAGE}"; do
-    log "pushing ${image}"
-    docker push "${image}"
-  done
+  log "pushing ${MAIN_IMAGE}"
+  docker push "${MAIN_IMAGE}"
 else
-  log "--no-push: ${MAIN_IMAGE} and ${RELEASE_IMAGE} stay local"
+  log "--no-push: ${MAIN_IMAGE} stays local"
 fi
 
 if (( FEISHU )); then
@@ -187,8 +216,7 @@ fi
 cat <<EOF
 
 Built:
-  main     ${MAIN_IMAGE}
-  release  ${RELEASE_IMAGE}
+  ${MAIN_IMAGE}
 
 Next: record ${MAIN_TAG} in the Feishu sheet for each platform (if --no-feishu was used), then
 package with ictrek.app/scripts/update_version.sh and let CI publish.

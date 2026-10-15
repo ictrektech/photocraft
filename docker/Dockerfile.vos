@@ -4,51 +4,56 @@
 #   docker/build_image.sh                 # amd64 (or the host's architecture)
 #   docker/build_image.sh --arch arm      # arm64, via buildx + qemu on an amd64 host
 #
-# The base is the root Dockerfile (the upstream community recipe); this file adds three changes
-# that make it buildable on networks where GitHub releases and crates.io are slow or blocked:
-#   - trunk and wasm-bindgen-cli are installed via cargo (not downloaded from GitHub releases)
-#   - rustup uses the Tsinghua mirror for the wasm32 target
-#   - cargo can be pointed at a crates.io mirror via CARGO_REGISTRY_MIRROR
+# The base is the root Dockerfile (the upstream community recipe); this file adds two changes that
+# make it buildable on networks where GitHub releases and crates.io are slow or blocked:
+#   - trunk and wasm-bindgen-cli come from the toolchain image (docker/Dockerfile.toolchain) instead
+#     of GitHub release downloads
+#   - rustup and cargo use the Tsinghua mirrors
 # Nothing else differs, so the site this image serves is the upstream web build plus the VOS
 # provenance labels.
 #
-# Keep WASM_BINDGEN_VERSION in sync with the wasm-bindgen pin in Cargo.lock, TRUNK_VERSION with
+# The toolchain lives in its own image so its ~400-crate `cargo install` step is not invalidated by
+# every change here (an ARG above `COPY . .` invalidates everything below it). Build and publish it
+# with docker/build_toolchain.sh when RUST_VERSION, TRUNK_VERSION, WASM_BINDGEN_VERSION or
+# WASM_OPT_VERSION changes; build_image.sh does not do it for you.
+#
+# Keep RUST_VERSION/TRUNK_VERSION/WASM_BINDGEN_VERSION/WASM_OPT_VERSION in sync with
+# docker/Dockerfile.toolchain and docker/toolchain_tag.sh (which computes the tag),
+# WASM_BINDGEN_VERSION with the wasm-bindgen pin in Cargo.lock, and TRUNK_VERSION with
 # .github/workflows/ci.yml / release.yml.
 
 ARG RUST_VERSION=1.99
-ARG NGINX_VERSION=1.28-alpine
-
-FROM rust:${RUST_VERSION}-slim-bookworm AS builder
 ARG TRUNK_VERSION=0.21.14
 ARG WASM_BINDGEN_VERSION=0.2.129
-ARG RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup
-# Override when crates.io is unreachable (e.g. behind the GFW):
-#   CARGO_REGISTRY_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/crates.io-index
-ARG CARGO_REGISTRY_MIRROR=
-ENV CARGO_REGISTRY_MIRROR=${CARGO_REGISTRY_MIRROR}
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && rustup target add wasm32-unknown-unknown
-# Install trunk via cargo so it uses the crates.io mirror instead of GitHub releases
-# (unreliable behind the GFW). wasm-bindgen-cli was already cargo-installed above for the
-# same reason; this makes trunk consistent with it.
-RUN cargo install trunk --version "${TRUNK_VERSION}" --locked \
-    && trunk --version
-RUN cargo install wasm-bindgen-cli --version "${WASM_BINDGEN_VERSION}" --locked \
-    && wasm-bindgen --version
+ARG WASM_OPT_VERSION=version_123
+ARG NGINX_VERSION=1.28-alpine
+# The fingerprint of the network knobs (CARGO_REGISTRY_MIRROR, GITHUB_ACCELERATOR) that the
+# toolchain tag carries; docker/toolchain_tag.sh computes it. It only matters for the FROM line
+# below: docker/build_image.sh passes a complete TOOLCHAIN_IMAGE and never uses this. The default is
+# deliberately a placeholder that resolves to nothing, so a bare `docker build .` against non-default
+# knobs fails to find an image instead of silently using one built with different settings.
+ARG TOOLCHAIN_FINGERPRINT=unknown
+
+# The per-architecture toolchain image. TOOLCHAIN_IMAGE overrides the whole reference (use it to
+# build against a locally tagged toolchain that is not pushed yet); otherwise the registry,
+# namespace, version ARGs above and the fingerprint compose it. TARGETARCH is set by BuildKit for
+# both plain `docker build` and `docker buildx --platform`.
+#
+# docker/build_image.sh always passes TOOLCHAIN_IMAGE, so this fallback is for a bare
+# `docker build .`; it duplicates the tag format in docker/toolchain_tag.sh.
+ARG REGISTRY=swr.cn-southwest-2.myhuaweicloud.com
+ARG NAMESPACE=ictrek
+ARG TOOLCHAIN_IMAGE=
+FROM ${TOOLCHAIN_IMAGE:-${REGISTRY}/${NAMESPACE}/photocraft-toolchain:rust${RUST_VERSION}-trunk${TRUNK_VERSION}-wasm-bindgen${WASM_BINDGEN_VERSION}-wasm-opt${WASM_OPT_VERSION#version_}-${TOOLCHAIN_FINGERPRINT}-${TARGETARCH}} AS builder
 
 WORKDIR /src
 COPY . .
 WORKDIR /src/apps/photocraft-web
 ARG CARGO_PROFILE_WASM_RELEASE_LTO=thin
-ARG CARGO_BUILD_JOBS=1
-# Point cargo at a crates.io mirror so trunk build doesn't hit the GFW.
-# Skipped when CARGO_REGISTRY_MIRROR is empty (the default: upstream builds are unaffected).
-RUN if [ -n "${CARGO_REGISTRY_MIRROR}" ]; then \
-        mkdir -p /root/.cargo && \
-        printf '[source.crates-io]\nreplace-with = "mirror"\n[source.mirror]\nregistry = "sparse+%s"\n' "${CARGO_REGISTRY_MIRROR}" > /root/.cargo/config.toml; \
-    fi
+# wasm-release is fat/thin LTO with codegen-units = 1: the highest peak memory in the workspace,
+# where too many parallel rustc processes get the build OOM-killed (packaging/web/README.md).
+# 8 suits a 32 GB+ builder; lower it with --build-arg CARGO_BUILD_JOBS=4 on a smaller one.
+ARG CARGO_BUILD_JOBS=8
 # Provenance shown in Help > About and in the image labels (crates/engine/src/build_info.rs).
 ARG PHOTOCRAFT_BUILD_SHA=
 ARG PHOTOCRAFT_BUILD_DATE=
