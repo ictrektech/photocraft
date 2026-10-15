@@ -1,0 +1,102 @@
+# syntax=docker/dockerfile:1
+# Toolchain base image for the VOS web build (docker/Dockerfile.vos): Rust, the wasm32 target,
+# trunk and wasm-bindgen-cli, plus the crates.io mirror configuration.
+#
+# Why it is a separate image: `cargo install trunk` and `cargo install wasm-bindgen-cli` compile
+# roughly 400 crates and take many minutes. In the application Dockerfile they sit above
+# `COPY . .`, so any earlier ARG change -- the mirror URL, the Rust version, the jobs count --
+# invalidates them and the next build pays the whole cost again. Here they are paid once per
+# toolchain version and then cached in the registry.
+#
+# Build it with docker/build_toolchain.sh, which computes the tag, skips the build when the image
+# already exists and pushes per architecture. Build it NATIVELY on each architecture: Huawei SWR
+# rejects OCI multi-arch index pushes (HTTP 400), so each arch gets its own tag, and compiling Rust
+# under qemu is impractically slow.
+
+ARG RUST_VERSION=1.99
+FROM rust:${RUST_VERSION}-slim-bookworm
+
+# Must match TRUNK_VERSION in .github/workflows/ci.yml and release.yml; WASM_BINDGEN_VERSION must
+# match the wasm-bindgen pin in Cargo.lock.
+ARG RUST_VERSION
+ARG TRUNK_VERSION=0.21.14
+ARG WASM_BINDGEN_VERSION=0.2.129
+ARG RUSTUP_DIST_SERVER=https://mirrors.tuna.tsinghua.edu.cn/rustup
+# Baked into $CARGO_HOME/config.toml, so the cargo installs below AND every `trunk build` that runs
+# in this image go through the mirror. Override when building the toolchain, not per app build.
+ARG CARGO_REGISTRY_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/
+# The workspace has one git dependency (craft-libs in the root Cargo.toml) that lives on github.com,
+# which is unreachable from the build network. Cargo clones it during `cargo metadata`, which is the
+# first thing `trunk build` runs, so the build fails without a rewrite. gh-proxy.com is reachable
+# (verified from inside this image); swap in another accelerator when it is down.
+ARG GITHUB_ACCELERATOR=https://gh-proxy.com/
+# The wasm-opt (binaryen) version trunk 0.21.14 downloads for its own build. It must match exactly:
+# trunk compares the string its `wasm-opt --version` prints against the version it wants, and falls
+# back to downloading when they differ -- which is why `apt install binaryen` does not help (Debian
+# bookworm ships 108, trixie 120). Bump this together with TRUNK_VERSION; `trunk tools show` prints
+# the expected value ("Default Version").
+ARG WASM_OPT_VERSION=version_123
+# Recorded in the image so `docker inspect` says which tag this was built as.
+ARG TOOLCHAIN_TAG=
+
+# The trailing slash is required for a sparse registry; it is added when the caller omits it.
+# The rust image sets CARGO_HOME=/usr/local/cargo, so /root/.cargo/config.toml would be ignored.
+RUN case "${CARGO_REGISTRY_MIRROR}" in */) ;; *) CARGO_REGISTRY_MIRROR="${CARGO_REGISTRY_MIRROR}/" ;; esac; \
+    cargo_home="${CARGO_HOME:-/usr/local/cargo}"; \
+    mkdir -p "${cargo_home}"; \
+    printf '[source.crates-io]\nreplace-with = "mirror"\n[source.mirror]\nregistry = "sparse+%s"\n' \
+      "${CARGO_REGISTRY_MIRROR}" > "${cargo_home}/config.toml"; \
+    cat "${cargo_home}/config.toml"
+
+# git is needed twice over: cargo shells out to it for the craft-libs git dependency (below), and
+# the rust:*-slim base image does not ship one.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl git \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup target add wasm32-unknown-unknown
+
+# Point the craft-libs git dependency at an accelerator, and make cargo shell out to git so the
+# rewrite applies at all: cargo defaults to libgit2, which reads neither git's insteadOf config nor
+# a proxy from the environment. --system, not --global: $HOME is not stable across build contexts.
+RUN git config --system url."${GITHUB_ACCELERATOR}https://github.com/".insteadOf "https://github.com/" \
+    && printf '\n[net]\ngit-fetch-with-cli = true\n' >> "${CARGO_HOME:-/usr/local/cargo}/config.toml" \
+    && cat "${CARGO_HOME:-/usr/local/cargo}/config.toml"
+
+# Install trunk and wasm-bindgen-cli from crates.io rather than downloading GitHub release binaries,
+# so this builds on networks where those downloads are blocked. The cache mount keeps the downloaded
+# crates across rebuilds even when this layer is invalidated.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo install trunk --version "${TRUNK_VERSION}" --locked \
+    && trunk --version
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo install wasm-bindgen-cli --version "${WASM_BINDGEN_VERSION}" --locked \
+    && wasm-bindgen --version
+
+# wasm-opt comes from a github.com release that trunk fetches during `trunk build --release`, and
+# github.com is unreachable from the build network. Install it here, through the accelerator: trunk
+# then finds it on PATH, matches the version and skips the download (verified with `trunk tools
+# show`: a matching binary on PATH reports `Installed Version: version_123`, otherwise `n/a`).
+RUN arch="$(dpkg --print-architecture)"; \
+    case "${arch}" in \
+        amd64) triple=x86_64-linux ;; \
+        arm64) triple=aarch64-linux ;; \
+        *) echo "unsupported architecture for wasm-opt: ${arch}" >&2; exit 1 ;; \
+    esac; \
+    url="${GITHUB_ACCELERATOR}https://github.com/WebAssembly/binaryen/releases/download/${WASM_OPT_VERSION}/binaryen-${WASM_OPT_VERSION}-${triple}.tar.gz"; \
+    curl -fsSL --retry 3 -A Photocraft-dev "${url}" -o /tmp/binaryen.tar.gz; \
+    tar -xzf /tmp/binaryen.tar.gz -C /opt; \
+    ln -sf "/opt/binaryen-${WASM_OPT_VERSION}/bin/wasm-opt" /usr/local/bin/wasm-opt; \
+    rm -f /tmp/binaryen.tar.gz; \
+    wasm-opt --version; \
+    trunk tools show | grep -A3 -i '^wasm-opt$'
+
+LABEL org.opencontainers.image.title="PhotoCraft VOS toolchain" \
+      org.opencontainers.image.description="Rust, the wasm32 target, trunk and wasm-bindgen-cli for the PhotoCraft VOS web build" \
+      org.opencontainers.image.licenses="MIT OR Apache-2.0" \
+      org.opencontainers.image.source="https://github.com/storytold/photocraft" \
+      com.ictrek.photocraft.toolchain.tag="${TOOLCHAIN_TAG}" \
+      com.ictrek.photocraft.toolchain.rust="${RUST_VERSION}" \
+      com.ictrek.photocraft.toolchain.trunk="${TRUNK_VERSION}" \
+      com.ictrek.photocraft.toolchain.wasm-bindgen="${WASM_BINDGEN_VERSION}" \
+      com.ictrek.photocraft.toolchain.wasm-opt="${WASM_OPT_VERSION}" \
+      com.ictrek.photocraft.toolchain.github-accelerator="${GITHUB_ACCELERATOR}"
