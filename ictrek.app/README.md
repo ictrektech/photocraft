@@ -24,8 +24,11 @@ ictrek.app/UPSTREAM.yml                    ← core / ref / fork_build（供 CI 
 | 同一 core 的第二次交付 | `./update_version.sh` | `0.8.2-vos.2` |
 | 我们主动抬 core（不兼容二开） | `./update_version.sh --core 0.9.0 --base 0.8.2` | `0.9.0-vos.1+up0.8.2` |
 
-镜像 tag 与上面解耦（VAI 惯例）：主 tag `<arch>_<YYYYMMDD>_<sha>`，另打一个可读的
-`<完整版本>-<arch>` 发布 tag。`package.sh` 从飞书读主 tag。
+镜像 tag 与上面解耦（VAI 惯例）：只有一个 tag `<arch>_<YYYYMMDD>_<sha>`，`package.sh` 和
+`audit-package.sh` 都从飞书读它并用同一个 `TAG_RE` 校验。版本不在 tag 里——它在
+`org.opencontainers.image.version` label、`VERSION` 和 `UPSTREAM.yml` 里。（以前另打一个可读的
+`<完整版本>-<arch>` 发布 tag，已删：没有任何脚本引用它，`TAG_RE` 也拒绝该格式，而且它不带
+`--tag-suffix`，同一天第二次构建会覆盖第一次。）
 
 ## 打包（本地调试用）
 

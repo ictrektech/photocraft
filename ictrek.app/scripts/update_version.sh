@@ -3,10 +3,13 @@
 # tag vos-photocraft-v<version> and push. GitHub Actions (.github/workflows/vos-release.yml)
 # builds the images and publishes the pull-mode package.
 #
-# With no arguments it follows the upstream core that local main has already merged (the newest
-# release tag reachable from main), and increments the build when main has not moved. A tag that is
+# With no arguments it follows the upstream core that local "mirror" has already merged (the newest
+# release tag reachable from it), and increments the build when mirror has not moved. A tag that is
 # only fetched, or only exists upstream, is ignored: sync first, then release. The check is local, so
 # a release needs no network.
+#
+# Branch layout (see docs/vos-integration.md): main carries the VOS work and is what ships; mirror is
+# the upstream release-tag mirror, only ever fast-forwarded, never committed to.
 #
 # Version shape: <upstream core>-vos.<build>[+up<base>]
 #   0.8.2-vos.1          the first VOS build of upstream 0.8.2
@@ -19,7 +22,7 @@ APP_LABEL="photocraft"
 TAG_PREFIX="vos-photocraft-v"
 # The branch that mirrors upstream. The upstream core is read from the newest release tag already
 # merged into it, so this only changes after a real sync (see docs/vos-integration.md).
-UPSTREAM_BRANCH="${VOS_UPSTREAM_BRANCH:-main}"
+UPSTREAM_BRANCH="${VOS_UPSTREAM_BRANCH:-mirror}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(cd "${HERE}/.." && pwd)"
 REPO_ROOT="$(git -C "${APP_DIR}" rev-parse --show-toplevel)"
@@ -31,13 +34,13 @@ usage() {
 Usage:
   ./update_version.sh [--same] [--upstream CORE | --bump [patch|minor|major] | --core CORE [--base CORE]] [--ref SHA]
 
-  (no arguments)          follow the upstream core already merged into local main; if main has not
-                          moved since the last release, increment the build instead
-                          0.8.2-vos.1 -> 0.8.2-vos.2   (main still on v0.8.2)
-                          0.8.2-vos.1 -> 0.9.0-vos.1   (main has v0.9.0 merged)
-                          Only tags already merged into local main count: one that was merely
+  (no arguments)          follow the upstream core already merged into local mirror; if mirror has
+                          not moved since the last release, increment the build instead
+                          0.8.2-vos.1 -> 0.8.2-vos.2   (mirror still on v0.8.2)
+                          0.8.2-vos.1 -> 0.9.0-vos.1   (mirror has v0.9.0 merged)
+                          Only tags already merged into local mirror count: one that was merely
                           fetched, or only exists upstream, is deliberately ignored.
-  --same                  force another delivery of the same core, without looking at main
+  --same                  force another delivery of the same core, without looking at mirror
   --upstream CORE         move to a newer upstream core                 --upstream 0.9.0 -> 0.9.0-vos.1
   --bump [part]           we raised the core ourselves (part: default minor)
                           --bump -> 0.9.0-vos.1+up0.8.2  (upstream base 0.8.2 stays recorded)
@@ -51,8 +54,8 @@ EOF
 
 die() { echo "[release][ERROR] $*" >&2; exit 1; }
 
-# No arguments: follow the upstream core already merged into local main, and fall back to
-# incrementing the build when main has not moved. This is the common case -- a release is either the
+# No arguments: follow the upstream core already merged into local mirror, and fall back to
+# incrementing the build when mirror has not moved. This is the common case -- a release is either the
 # next delivery of the same core or the first after a sync -- and it costs nothing: the check reads
 # only local tags. `--same` forces the increment without looking.
 mode="from-main"
@@ -123,7 +126,7 @@ bump_core() {
 record_base=true
 case "${mode}" in
   from-main)
-    # The core is whatever upstream release local main has actually merged. No network: a tag that
+    # The core is whatever upstream release local mirror has actually merged. No network: a tag that
     # is only fetched is ignored on purpose, because recording it would name a base commit this
     # branch does not contain. sort -V is numeric-aware, so 0.9.0 < 0.10.0 (a `${tag//./}` + `-gt`
     # comparison reads "090" as octal and fails on any 8 or 9 in the version).

@@ -36,6 +36,18 @@ TMPL="docker/vos-dev/traefik.dev.yml.tmpl"
 TRUNK_CONFIG="apps/photocraft-web/Trunk.vos-dev.toml"
 COMPOSE_FILE="docker/vos-dev/docker-compose.yml"
 CONTAINER="photocraft-vos-dev-web"
+# The toolchain base image docker/Dockerfile.vos starts FROM (docker/Dockerfile.toolchain): Rust,
+# the wasm32 target, trunk and wasm-bindgen-cli. Keep these defaults in sync with
+# docker/build_toolchain.sh, which computes the same tag. VOS_DEV_TOOLCHAIN_IMAGE overrides the
+# whole reference, for a locally tagged toolchain that is not pushed yet.
+TOOLCHAIN_REPO="${VOS_DEV_TOOLCHAIN_REPO:-swr.cn-southwest-2.myhuaweicloud.com/ictrek/photocraft-toolchain}"
+RUST_VERSION="${RUST_VERSION:-1.99}"
+TRUNK_VERSION="${TRUNK_VERSION:-0.21.14}"
+WASM_BINDGEN_VERSION="${WASM_BINDGEN_VERSION:-0.2.129}"
+WASM_OPT_VERSION="${WASM_OPT_VERSION:-version_123}"
+CARGO_REGISTRY_MIRROR="${CARGO_REGISTRY_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/}"
+GITHUB_ACCELERATOR="${GITHUB_ACCELERATOR:-https://gh-proxy.com/}"
+TOOLCHAIN_IMAGE="${VOS_DEV_TOOLCHAIN_IMAGE:-}"
 # Generous by default: the first build compiles 2000+ crates and trunk may download wasm-bindgen
 # (8 MB) or wasm-opt (114 MB) at a few tens of KB/s. Ctrl-C is the escape hatch, not a timeout.
 HEALTH_TIMEOUT="${VOS_DEV_HEALTH_TIMEOUT:-1800}"
@@ -53,6 +65,29 @@ warn() { printf '\033[33m[vos-dev] %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31m[vos-dev][ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
 
 use_trunk() { [ "${VOS_DEV_WEB:-1}" = "1" ]; }
+# The toolchain tag encodes every input that changes the image contents (including the network
+# knobs), exactly as docker/build_toolchain.sh computes it -- both call docker/toolchain_tag.sh.
+# TARGETARCH in the Dockerfile covers the architecture.
+toolchain_image() {
+  if [ -n "${TOOLCHAIN_IMAGE}" ]; then
+    printf '%s' "${TOOLCHAIN_IMAGE}"
+    return 0
+  fi
+  local arch
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) arch="$(uname -m)" ;;
+  esac
+  printf '%s:%s' "${TOOLCHAIN_REPO}" \
+    "$(RUST_VERSION="${RUST_VERSION}" \
+       TRUNK_VERSION="${TRUNK_VERSION}" \
+       WASM_BINDGEN_VERSION="${WASM_BINDGEN_VERSION}" \
+       WASM_OPT_VERSION="${WASM_OPT_VERSION}" \
+       CARGO_REGISTRY_MIRROR="${CARGO_REGISTRY_MIRROR}" \
+       GITHUB_ACCELERATOR="${GITHUB_ACCELERATOR}" \
+       bash "${ROOT_DIR}/docker/toolchain_tag.sh" "${arch}")"
+}
 web_port() { if use_trunk; then printf '%s' "$DEV_PORT"; else printf '%s' "$DIST_PORT"; fi; }
 have() { command -v "$1" >/dev/null 2>&1; }
 port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
@@ -227,13 +262,23 @@ copy_fonts() {
 # -------------------------------------------------------------------------- build the site
 
 # The same build the deployed image runs, without publishing anything: the Dockerfile's builder
-# stage with a local output, so it needs Docker but no host Rust/trunk toolchain.
+# stage with a local output, so it needs Docker but no host Rust/trunk toolchain. It does need the
+# toolchain base image (docker/Dockerfile.toolchain), which supplies Rust, trunk and wasm-bindgen.
 build_web() {
   log "building dist/web through the image build stage (docker/Dockerfile.vos --target builder)"
+  if ! docker image inspect "$(toolchain_image)" >/dev/null 2>&1 \
+     && ! docker manifest inspect "$(toolchain_image)" >/dev/null 2>&1; then
+    die "the toolchain image is not available, so this build has no Rust/trunk/wasm-bindgen:
+  $(toolchain_image)
+  Build and publish it once (several minutes; do it on this host's architecture):
+      docker/build_toolchain.sh
+  Then retry: make vos-dev-web"
+  fi
   rm -rf dist/vos-dev/web-out
   DOCKER_BUILDKIT=1 docker build \
     --file docker/Dockerfile.vos \
     --target builder \
+    --build-arg "TOOLCHAIN_IMAGE=$(toolchain_image)" \
     --output "type=local,dest=dist/vos-dev/web-out" \
     . || die "the web build failed"
   rm -rf dist/web

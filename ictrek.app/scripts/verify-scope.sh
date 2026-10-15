@@ -6,7 +6,7 @@
 #   ./scripts/verify-scope.sh --list     # just print what differs, always exit 0
 #   ./scripts/verify-scope.sh --base v0.8.2
 #
-# Why it matters: main tracks upstream untouched and vos/ carries only the VOS packaging, so
+# Why it matters: mirror tracks upstream untouched and main carries the VOS packaging, so
 # `git rebase` stays a five-minute job. A change to a core file that this script rejects is still
 # allowed -- but it must be added to the whitelist deliberately, in the same commit that makes it.
 set -euo pipefail
@@ -84,7 +84,7 @@ if ! git rev-parse --verify --quiet "${base}^{commit}" >/dev/null; then
   die "the upstream base ${base} is not a local ref: git fetch upstream --tags (or pass --base <sha>)"
 fi
 if ! git merge-base --is-ancestor "${base}" HEAD; then
-  die "HEAD is not a descendant of ${base}: fetch upstream and rebase vos onto the new upstream release first
+  die "HEAD is not a descendant of ${base}: fetch upstream and rebase main onto the new upstream release first
   (see plan/vos-integration.md, 'Upstream sync')"
 fi
 log "base ${base} ($(git rev-parse --short "$base"))"
