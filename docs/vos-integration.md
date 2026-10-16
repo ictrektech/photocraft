@@ -99,7 +99,8 @@ Everything else (Rust, trunk, wasm-bindgen-cli, crates.io) goes through the Tsin
 ## Local development inside the platform
 
 ```bash
-make vos-dev                 # trunk dev server on 38092 + a temporary Traefik route
+make vos-dev                 # nginx fronting the dev build on 38093 + a temporary Traefik route
+VOS_DEV_WEB=2 make vos-dev   # trunk dev server only, no container, on 38092
 VOS_DEV_WEB=0 make vos-dev   # fidelity mode: dist/web through the VOS image's nginx on 38093
 make vos-dev-status          # mode, port, route, and which copy the platform is serving
 make vos-dev-down            # remove the route and stop everything
@@ -113,7 +114,7 @@ curl -sI http://172.17.0.1:1182/app/com.ictrek.photocraft/ | grep -i x-photocraf
 ```
 
 The temporary route strips `/app/com.ictrek.photocraft` exactly like the installed app's route does,
-so both modes serve the same URLs the shipped nginx configuration expects.
+so every mode serves the same URLs the shipped nginx configuration expects.
 
 **The dev server must not listen on loopback.** Traefik reaches this workstation through the docker
 bridge (`VOS_HOST_GW_IP`, `172.17.0.1`), so a `127.0.0.1`-only listener is unreachable from it: the
@@ -168,16 +169,22 @@ directory, so a config kept elsewhere fails with "error getting the canonical pa
 target HTML file". A manifest listing a file that is not there fails the build rather than quietly
 serving fewer fonts.
 
-**You need the wasm target.** Trunk mode compiles on this workstation, so the toolchain needs it
-once (the build host and the Docker image have their own):
+**You need the wasm target.** Both dev modes compile on this workstation (only fidelity builds in
+Docker), so the toolchain needs it once:
 
 ```bash
 rustup target add wasm32-unknown-unknown
 ```
 
+The default mode also needs Docker: it serves `dist/web-dev` through an nginx container that mounts
+the app's own `packaging/web/nginx.conf`, so the runtime under test is the one that ships. Trunk
+still does the building on the host, which is what keeps the ~16s rebuild; the container proxies
+trunk's auto-reload websocket back to it. Run `VOS_DEV_WEB=2 make vos-dev` to skip the container
+entirely.
+
 The tools, and which mode needs which:
 
-| Tool | dev (`make vos-dev`) | fidelity (`VOS_DEV_WEB=0`) |
+| Tool | dev (`make vos-dev`, `VOS_DEV_WEB=2`) | fidelity (`VOS_DEV_WEB=0`) |
 | --- | --- | --- |
 | `wasm32-unknown-unknown` target | needed | needs only Docker |
 | `wasm-bindgen` (0.2.129) | needed; `cargo install wasm-bindgen-cli --version 0.2.129 --locked` avoids trunk's own 8 MB download | inside the image |
@@ -319,15 +326,119 @@ The upstream commit recorded in `UPSTREAM.yml` is resolved from the upstream rel
 `v<core>` (falling back to `upstream/v<core>` if you keep such a tag); `--ref <sha>` overrides both
 when the base has no local tag.
 
-## Phase 2 (designed, not implemented)
+## Phase 2: VOS storage (implemented)
 
-The manifest already declares the platform OAuth2 client and the compose file reserves the place
-for a thin BFF, so this can be added without touching the delivery shape:
+The web build opens and saves documents in the platform's storage. Almost everything lives in
+`apps/photocraft-web/src/vos/`: the plugin fills the shell's existing `Services` seams
+(`file_dialog`, `write`) and draws its own window. Listing the user's documents on the Home
+screen needs one small seam in `crates/ui-egui` (see "The Home screen" below), which is the
+only core change this phase makes.
 
-- **Files**: open and save documents from VOS Finder (`/v1000/finder_next/{index,download,save,upload}`)
-  instead of the browser picker. This is the only change that reaches into `crates/ui-egui`
-  (the `Services` file-dialog seam) and it is deliberately deferred.
-- **Identity**: `window.vos_platform.api.v1000.oauth2.*` (OIDC fastpath) for the current user; the
-  web shell would also pick up the platform's UI language.
-- **Storage**: nothing is persisted by the app itself; if that ever changes, per-user data goes to
-  `${VOS_APP_STORAGE_PATH}/users/<sub>/`.
+| File | Role |
+| --- | --- |
+| `vos.rs` | Module layout and the `cfg` gates (documented there) |
+| `vos/path.rs` | The `<adapter>://<dir>/<name>` grammar, pure and host-tested |
+| `vos/model.rs` | Finder reply decoding and the error-code wording, pure and host-tested |
+| `vos/state.rs` | The picker's state machine, pure and host-tested |
+| `vos/bridge.rs` | `window.vos_platform` detection, PKCE, per-tab token cache |
+| `vos/http.rs` | `fetch` wrappers for `index` / `download` / `upload` / the volume list |
+| `vos/recent.rs` | The documents VOS holds, newest first, pure and host-tested |
+| `vos/picker.rs` | The Finder window (egui) |
+| `vos/home.rs` | The Home screen's VOS section: what to list, and the `localStorage` store |
+| `vos/install.rs` | Wires the dialogs and the Home list into `Services`, drives the async flow |
+
+**Identity.** `window.vos_platform.api.v1000.oauth2.authorize()` + `token()` (the public PKCE
+client declared in `ictrek.app/src/manifest.yml`). The app's own access token carries the user's
+permission codes, so Finder calls run **as the signed-in user** and the platform enforces RBAC;
+the platform's JWT is never read. The token lives in `sessionStorage` for the tab.
+
+**Behaviour without VOS.** `install` checks for the bridge and does nothing when it is absent, so
+a local `trunk serve` or a directly-opened page keeps the browser picker and the download.
+
+**Saving.** A Finder path becomes the document's path, so Ctrl+S writes back to the same file
+(`saves_in_place` accepts `.psd`/`.psb`/`.pcraft`/`.ora`). Uploads send
+`conflict_strategy=overwrite`, because the platform's default rejects an existing name.
+
+### The Home screen
+
+The Home screen (Photoshop's start screen) already exists and is on by default
+(`general.autoShowHomeScreen`). On the web its recent list was **deliberately empty**:
+`canvas.rs`'s `start_screen` skips `recent_files` under `cfg!(target_arch = "wasm32")`, because
+a browser page has no local paths to reopen, and File > Open Recent answers "unavailable"
+there. That left a refresh looking like a blank new app.
+
+Two seams in `crates/ui-egui` close that gap. They name *platform storage*, not VOS, so they are
+generic enough to carry upstream:
+
+| Item | Role |
+| --- | --- |
+| `Services::platform_files` | Returns a `PlatformListing` (heading, an optional browse row, the files) for the Home screen. |
+| `Services::platform_open` | Receives a `PlatformRequest` (`Open(id)` or `Browse`) when a row is clicked. |
+| `PlatformFile` / `PlatformListing` / `PlatformRequest` | The data: an opaque `id` the shell hands straight back, a `name`, and a `detail` line. |
+| `canvas.rs::home_platform` | Draws the section; it owns no state and does no I/O. |
+
+The plugin fills both: `platform_files` reads `vos/recent.rs` (the paths it has opened or saved,
+persisted in `localStorage` under `photocraft.vos.recent`), and `platform_open` turns a click
+into a Finder download or into the ordinary File > Open. The Finder has no "recent" endpoint and
+its entries carry no modification time, so the list has to be the plugin's own.
+
+Asynchronous results cannot hold `&mut PhotocraftApp` across an `await`, so a downloaded
+document waits in the plugin's state and `vos::ui` opens it on a later frame — the same shape as
+`Services::inbox`. Opening a listed file passes its **full Finder path** to `open_file`, so
+`Ctrl+S` writes back to VOS while the tab shows only the file name; the path is then removed from
+File > Open Recent (the web cannot reopen one), leaving the Home list as the web's recent list.
+
+A failed upload used to be silent: the plugin's `write` wrapper takes the bytes and returns `Ok`
+so the engine marks the document clean, while the upload's own failure only reached the log. It
+now reports through `app.ui.status`/`status_error` and `notices::error`.
+
+### Why Finder and not the exposed-path grant (数据访问控制)
+
+The platform also offers per-app directory grants, surfaced as the app store's 「数据访问控制」
+dialog. They are the wrong tool here: a grant **bind-mounts** a directory into the app container
+at `VOS_APP_EXPOSED_PATH`, and its HTTP API returns metadata only. This app is a static wasm page
+in a browser — it has no container filesystem to read — so a grant would only be useful with a
+backend container serving those bytes. A grant is also application-wide (nginx has no user
+identity), which would expose one user's files to every other signed-in user. Finder is plain
+same-origin HTTP with the platform doing per-user isolation, so it needs no backend at all.
+An exposed-path-backed **shared media library** becomes interesting only once a BFF exists;
+app-private data (autosave, thumbnails) would then go to `${VOS_APP_STORAGE_PATH}/users/<sub>/`.
+
+### Not yet built
+
+- **Autosave / crash recovery.** `Services::autosave`/`recover` are still unset on the web, so a
+  refresh loses an edited document unless it was saved to VOS.
+- **New Folder, rename, delete, shares, public directories.** The Finder API has them; the picker
+  currently browses personal-space volumes only.
+- **Large files.** Downloads are fetched whole into wasm memory; a very large PSD may need
+  streaming or a BFF.
+- **UI language.** The picker's strings are English (`i18n::t` falls back to the source string);
+  they are deliberately not `tl!` literals, whose catalogs live in `crates/`.
+
+### Upstream sync
+
+This phase adds registered deviations. Most are new files inside the fork's `apps/` scope, so
+they never conflict: `apps/photocraft-web/src/vos.rs` and `apps/photocraft-web/src/vos/*`.
+Small edits: `apps/photocraft-web/src/main.rs` (one `mod`), `.../web.rs` (install + one draw
+call), `.../Cargo.toml` (`serde`/`serde_json`, already in the workspace, plus four `web-sys`
+features).
+
+The Home screen additionally touches core, minimally and generically — it names platform storage,
+not VOS:
+
+- `crates/ui-egui/src/lib.rs`: two `Services` fields (`platform_files`, `platform_open`) and three
+  public types (`PlatformFile`, `PlatformListing`, `PlatformRequest`).
+- `crates/ui-egui/src/canvas.rs`: `start_screen` asks for the listing and draws the section
+  (`home_platform`), with its test.
+
+Both are additive: every other `Services` literal uses `..Default::default()`, and the desktop
+path is unchanged (`platform_files` stays `None`, so the local recent list is used as before).
+These are the two core files `verify-scope.sh` reports after committing — note it diffs
+`base..HEAD`, so **uncommitted work is invisible to it**. Run `make vos-scope` after committing to
+see the full list.
+
+Tests: `cargo test -p photocraft-web` covers the pure modules (path grammar, reply decoding,
+picker transitions, the recent list). `cargo test -p photocraft-ui-egui --lib canvas::tests`
+covers the Home-screen seam (`the_home_screen_lists_platform_files_and_routes_their_clicks`).
+The browser modules are compile-checked by `cargo xtask wasm`.
+

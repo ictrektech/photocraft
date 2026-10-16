@@ -5,9 +5,10 @@
 # (../vai/apps/*/Makefile).
 #
 # Development inside the platform:
-#   make vos-dev               trunk dev server (watch + auto reload) + a temporary Traefik route
+#   make vos-dev               nginx fronting the dev build (container, watch + auto reload) + a route
+#   VOS_DEV_WEB=2 make vos-dev trunk dev server only, no container
 #   VOS_DEV_WEB=0 make vos-dev fidelity mode: dist/web served by the VOS image's nginx
-#   make vos-dev-down          remove the route and stop the server
+#   make vos-dev-down          remove the route and stop the server/container
 #
 # Packaging:
 #   make vos-package           dry-run package (template check, no Feishu)
@@ -25,7 +26,7 @@ help:
 
 ## ---- VOS local development --------------------------------------------------------------
 
-vos-dev: ## [VOS] 联调：trunk dev server + 平台临时路由（VOS_DEV_WEB=0 用 dist/web 产物）
+vos-dev: ## [VOS] 联调：nginx 前置 dev 构建 + 平台临时路由（VOS_DEV_WEB=2 纯 trunk，VOS_DEV_WEB=0 保真）
 	scripts/vos-dev.sh up
 
 vos-dev-down: ## [VOS] 撤临时路由并停止 dev server / 容器
@@ -34,7 +35,7 @@ vos-dev-down: ## [VOS] 撤临时路由并停止 dev server / 容器
 vos-dev-status: ## [VOS] 查看模式、端口、临时路由与平台流量归属
 	scripts/vos-dev.sh status
 
-vos-dev-logs: ## [VOS] 跟随保真模式容器日志
+vos-dev-logs: ## [VOS] 跟随 nginx 容器日志
 	scripts/vos-dev.sh logs
 
 vos-dev-web: ## [VOS] 构建 dist/web（走镜像构建阶段，可选 CRAFT_FONTS_DIR 带入字体）

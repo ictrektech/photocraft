@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # VOS local development for PhotoCraft: serve the app from this workstation inside the platform.
 #
-#   make vos-dev                 # trunk dev server (watch + auto reload) + temporary Traefik route
+#   make vos-dev                 # nginx fronting the dev build (container) + temporary Traefik route
+#   VOS_DEV_WEB=2 make vos-dev   # trunk dev server only, no container (watch + auto reload)
 #   VOS_DEV_WEB=0 make vos-dev   # fidelity mode: dist/web served by the VOS image's nginx
 #   make vos-dev-down            # remove the route, stop the server/container
 #   make vos-dev-status          # what is running and who the platform traffic goes to
-#   make vos-dev-logs            # follow the fidelity container
+#   make vos-dev-logs            # follow the nginx container
 #   make vos-dev-web             # (re)build dist/web, with fonts, without the platform
 #
 # Nothing here touches the app the platform has installed: it writes one Traefik file-provider
@@ -25,7 +26,7 @@ export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-1}"
 APP_ID="com.ictrek.photocraft"
 BASE_PATH="/app/${APP_ID}"
 DEV_PORT="${VOS_DEV_PORT:-38092}"           # trunk dev server
-DIST_PORT="${VOS_DEV_DIST_PORT:-38093}"     # fidelity-mode nginx
+DIST_PORT="${VOS_DEV_DIST_PORT:-38093}"     # nginx container
 HOST_GW="${VOS_HOST_GW_IP:-172.17.0.1}"     # Traefik reaches the host through this gateway
 # Where the dev server listens. NOT loopback: the Traefik container reaches this machine through the
 # docker bridge (HOST_GW), and a 127.0.0.1-only listener is invisible from there — the platform then
@@ -70,7 +71,13 @@ log()  { printf '\033[36m[vos-dev]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[vos-dev] %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31m[vos-dev][ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
 
-use_trunk() { [ "${VOS_DEV_WEB:-1}" = "1" ]; }
+# Which server answers the platform route:
+#   1  nginx serves the dev build: the app's own runtime, with trunk behind it for the build and the
+#      auto-reload websocket (the default)
+#   2  trunk serves the dev build directly, with no container at all
+#   0  nginx serves a release build (byte-identical artifact, slowest to rebuild)
+use_dev_nginx() { [ "${VOS_DEV_WEB:-1}" = "1" ]; }
+use_trunk()     { [ "${VOS_DEV_WEB:-1}" = "2" ]; }
 # The toolchain tag encodes every input that changes the image contents (including the network
 # knobs), exactly as docker/build_toolchain.sh computes it -- both call docker/toolchain_tag.sh.
 # TARGETARCH in the Dockerfile covers the architecture.
@@ -105,9 +112,8 @@ ensure_port_free() {
   fi
 }
 
-# The pid file holds trunk itself, not the subshell that started it (see cmd_up): the subshell
-# exits at once with a process substitution, which is what made `wait` return immediately and the
-# script tear down a perfectly healthy dev server.
+# The pid file holds trunk itself, not the subshell that started it (see cmd_up): a subshell exits at
+# once when its command line ends in `&`, so `wait` would return immediately.
 pid_alive() { kill -0 "$1" 2>/dev/null; }
 tree_running() { [ -f "$TRUNK_PID_FILE" ] && pid_alive "$(cat "$TRUNK_PID_FILE")"; }
 pid_in_file() { cat "$TRUNK_PID_FILE" 2>/dev/null || printf ''; }
@@ -119,7 +125,7 @@ route_on() {
   local port="$1" tmp
   if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$TRAEFIK_CONTAINER"; then
     warn "no container named ${TRAEFIK_CONTAINER}: the temporary route was NOT written."
-    warn "Open http://127.0.0.1:${port}${BASE_PATH}/?v=dev directly, or set VOS_TRAEFIK_CONTAINER."
+    warn "Open http://127.0.0.1:${port}/?v=dev directly, or set VOS_TRAEFIK_CONTAINER."
     return 0
   fi
   # /data/vos/traefik belongs to the container user, so the file is copied in instead of being
@@ -135,15 +141,11 @@ route_on() {
   log "route written: ${ROUTE_FILE} -> http://${HOST_GW}:${port}"
 }
 
-# URL the platform's own gateway will request. The dev server has to answer it for the app to work
-# in the browser; trunk serves at the root, the fidelity container under BASE_PATH.
+# URL the platform's own gateway will request, once Traefik has stripped BASE_PATH off it. The dev
+# server has to answer that for the app to work in the browser, and both servers do: trunk serves the
+# site at its own root and so does the nginx container (BASE_PATH is Traefik's, never the server's).
 dev_probe_url() {
-  local port="$1"
-  if use_trunk; then
-    printf 'http://%s:%s/index.html' "$HOST_GW" "$port"
-  else
-    printf 'http://%s:%s%s/index.html' "$HOST_GW" "$port" "$BASE_PATH"
-  fi
+  printf 'http://%s:%s/index.html' "$HOST_GW" "$1"
 }
 
 # A wildcard bind is not a sane URL to hand out (0.0.0.0 works on Linux, not everywhere).
@@ -267,6 +269,15 @@ copy_fonts() {
 
 # -------------------------------------------------------------------------- build the site
 
+# Copy the fonts into the built site. A missing font folder is a warning: the site still works, it
+# just has no extra CJK coverage.
+cmd_copy_fonts() {
+  local dest="${TRUNK_STAGING_DIR:-}"
+  [ -n "$dest" ] || die "copy-fonts: TRUNK_STAGING_DIR is not set (this runs as a trunk post_build hook)"
+  PHOTOCRAFT_WEB_FONTS_DIR="${PHOTOCRAFT_WEB_FONTS_DIR:-$(fonts_src)}" \
+    bash "${ROOT_DIR}/scripts/vos-fonts.sh" "$dest"
+}
+
 # The same build the deployed image runs, without publishing anything: the Dockerfile's builder
 # stage with a local output, so it needs Docker but no host Rust/trunk toolchain. It does need the
 # toolchain base image (docker/Dockerfile.toolchain), which supplies Rust, trunk and wasm-bindgen.
@@ -297,63 +308,93 @@ build_web() {
 
 # ------------------------------------------------------------------------------------ modes
 
+# Renders the nginx config the container mounts: the file the published image serves, with the IPv6
+# listener removed. The image strips that line at build time (docker/Dockerfile.vos); a host kernel
+# without IPv6 would otherwise fail the bind with "socket() [::]:8080 failed".
+render_nginx_conf() {
+  local mode="$1"
+  sed '/listen \[::\]:8080;/d' packaging/web/nginx.conf > "${STATE_DIR}/nginx.conf"
+  if grep -q 'listen \[::\]:8080;' "${STATE_DIR}/nginx.conf"; then
+    die "could not strip the IPv6 listener from packaging/web/nginx.conf; the nginx container would not start"
+  fi
+}
+
+# Renders docker/vos-dev/docker-compose.yml into the state dir, where its relative paths resolve.
+render_compose() {
+  local html_dir="$1" port="$2"
+  sed -e "s|__VOS_DEV_WEB_IMAGE__|${WEB_IMAGE}|g" \
+      -e "s|__VOS_DEV_DIST_PORT__|${port}|g" \
+      -e "s|__VOS_DEV_HTML_DIR__|${html_dir}|g" \
+      "$COMPOSE_FILE" > "${STATE_DIR}/docker-compose.rendered.yml"
+}
+
+# `trunk serve` does the building in every dev mode: it compiles with the wasm-dev profile, watches
+# the workspace, and owns the auto-reload websocket. Its own port is only reached directly by the
+# browser in the trunk mode; the nginx-fronted mode proxies the websocket to it.
+start_trunk() {
+  have trunk || die "trunk is not installed (cargo install trunk --locked); or use VOS_DEV_WEB=0 make vos-dev"
+  tree_running && die "a trunk dev server is already running (pid $(pid_in_file)); make vos-dev-down first"
+  ensure_port_free "$DEV_PORT"
+  preflight_build_tools
+  log "starting trunk serve on ${DEV_BIND_ADDR}:${DEV_PORT} (watch + auto reload)"
+  log "the platform reaches it as http://${HOST_GW}:${DEV_PORT}; binding to loopback instead would make
+  every request through Traefik a 502"
+  log "config: ${TRUNK_CONFIG}; its post_build hooks re-copy the served fonts and precompress the site"
+  # trunk resolves the build target, dist and hook cwd against the config file's directory, so it
+  # runs from here just as well. Starting it in this shell (no subshell, no pipeline) makes its pid
+  # exactly $!; `( ... & )` or a `| tee` hand $! to a helper that exits at once.
+  nohup trunk serve --config "$TRUNK_CONFIG" --address "$DEV_BIND_ADDR" --port "$DEV_PORT" > "$TRUNK_LOG" 2>&1 &
+  TRUNK_PID=$!
+  printf '%s\n' "$TRUNK_PID" > "$TRUNK_PID_FILE"
+  log "trunk serve is pid ${TRUNK_PID}"
+  # trunk writes the file; this mirrors the same output to the terminal.
+  tail -n +1 -f "$TRUNK_LOG" &
+  TAIL_PID=$!
+  printf '%s\n' "$TAIL_PID" > "${STATE_DIR}/tail.pid"
+  # Probed through HOST_GW, not 127.0.0.1: "ready" has to mean ready for Traefik.
+  wait_for_http "http://${HOST_GW}:${DEV_PORT}/index.html" "trunk dev server"
+}
+
+# nginx in front of dist/web-dev, with trunk behind it for the build and the websocket.
+start_dev_nginx() {
+  local port="$1"
+  have docker || die "docker is not installed, and the default mode serves the dev build through an
+  nginx container. Install Docker, or run without a container:
+      VOS_DEV_WEB=2 make vos-dev"
+  render_nginx_conf dev
+  render_compose "../../dist/web-dev" "$port"
+  log "starting nginx on ${port} (serving dist/web-dev; trunk keeps building behind it)"
+  docker compose -f "${STATE_DIR}/docker-compose.rendered.yml" up -d
+  # Probed at the root, not under BASE_PATH: BASE_PATH belongs to Traefik's route, which strips it
+  # before the request reaches this container, and nginx has no location for it.
+  wait_for_http "http://127.0.0.1:${port}/index.html" "dev nginx container"
+}
+
 cmd_up() {
   local port
   port="$(web_port)"
   mkdir -p "$STATE_DIR"
 
-  if use_trunk; then
-    have trunk || die "trunk is not installed (cargo install trunk --locked); or use VOS_DEV_WEB=0 make vos-dev"
-    tree_running && die "a trunk dev server is already running (pid $(pid_in_file)); make vos-dev-down first"
-    ensure_port_free "$port"
-    preflight_build_tools
-    log "starting trunk serve on ${DEV_BIND_ADDR}:${port} (watch + auto reload)"
-    log "the platform reaches it as http://${HOST_GW}:${port}; binding to loopback instead would make
-  every request through Traefik a 502"
-    log "config: ${TRUNK_CONFIG}; its post_build hook re-copies the served fonts after every rebuild"
-    # trunk resolves the build target, dist and hook cwd against the config file's directory, so it
-    # runs from here just as well — and running it in this shell (no subshell, no pipeline) makes its
-    # pid exactly $!, which is what the exit check and cmd_down use. `( ... & )` or a `| tee` both
-    # hand $! to a helper that exits at once, which is what used to tear the dev server down
-    # immediately after starting it.
-    nohup trunk serve --config "$TRUNK_CONFIG" --address "$DEV_BIND_ADDR" --port "$port" > "$TRUNK_LOG" 2>&1 &
-    TRUNK_PID=$!
-    printf '%s\n' "$TRUNK_PID" > "$TRUNK_PID_FILE"
-    log "trunk serve is pid ${TRUNK_PID}"
-    # The same output here and in the file (trunk writes the file, this mirrors it to the terminal).
-    tail -n +1 -f "$TRUNK_LOG" &
-    TAIL_PID=$!
-    printf '%s\n' "$TAIL_PID" > "${STATE_DIR}/tail.pid"
-    # Probed through HOST_GW (not 127.0.0.1) on purpose: "ready" must mean ready for Traefik.
-    wait_for_http "$(dev_probe_url "$port")" "trunk dev server"
+  if use_dev_nginx; then
+    start_trunk
+    start_dev_nginx "$port"
+  elif use_trunk; then
+    start_trunk
   else
     build_web
     ensure_port_free "$port"
-    # The published image strips the `listen [::]:8080` line at build time (docker/Dockerfile.vos):
-    # on a host whose kernel has no IPv6 that bind fails and nginx exits. Fidelity mode mounts the
-    # config directly, so the same line has to come off here or the container dies with
-    # "socket() [::]:8080 failed". Doing it to a copy also keeps the mounted file byte-identical to
-    # the one the image serves, which is the whole point of this mode.
-    sed '/listen \[::\]:8080;/d' packaging/web/nginx.conf > "${STATE_DIR}/nginx.conf"
-    if grep -q 'listen \[::\]:8080;' "${STATE_DIR}/nginx.conf"; then
-      die "could not strip the IPv6 listener from packaging/web/nginx.conf; the fidelity container would not start"
-    fi
-    sed -e "s|__VOS_DEV_WEB_IMAGE__|${WEB_IMAGE}|g" -e "s|__VOS_DEV_DIST_PORT__|${port}|g" \
-      "$COMPOSE_FILE" > "${STATE_DIR}/docker-compose.rendered.yml"
+    render_nginx_conf release
+    render_compose "../../dist/web" "$port"
     log "starting the fidelity container on ${port} (nginx serving dist/web)"
     docker compose -f "${STATE_DIR}/docker-compose.rendered.yml" up -d
-    wait_for_http "http://127.0.0.1:${port}${BASE_PATH}/index.html" "fidelity container"
+    wait_for_http "http://127.0.0.1:${port}/index.html" "fidelity container"
   fi
 
   route_on "$port"
   verify_reachable_from_traefik "$port"
-  local direct_url
-  if use_trunk; then
-    # trunk serves the built site at the URL root; only the platform route strips BASE_PATH.
-    direct_url="http://$(local_addr):${port}/?v=dev"
-  else
-    direct_url="http://$(local_addr):${port}${BASE_PATH}/?v=dev"
-  fi
+  # Every mode serves the site at its own root: trunk because that is where it puts it, nginx because
+  # BASE_PATH is Traefik's to strip.
+  local direct_url="http://$(local_addr):${port}/?v=dev"
   cat <<EOF
 
 PhotoCraft dev is ready:
@@ -364,18 +405,16 @@ PhotoCraft dev is ready:
 Open the platform and click PhotoCraft: it now loads this working copy.
 EOF
 
-  if use_trunk; then
+  if use_trunk || use_dev_nginx; then
     log "trunk is serving (its output is above); Ctrl-C removes the temporary route and stops it"
     # INT/TERM/HUP for the usual Ctrl-C and kill paths; EXIT so a shell that dies some other way
-    # still removes the temporary route (a stale route would keep sending the platform to a dev
-    # server that is no longer running).
+    # still removes the temporary route, which would otherwise keep sending the platform to a dev
+    # server that is no longer running.
     trap 'cmd_down "interrupted"' INT TERM HUP
     trap 'cmd_down "shell exiting"' EXIT
-    # Stay attached to trunk: rebuilds keep printing here. The loop re-checks liveness instead of
-    # relying on `wait`, because trunk may not be a direct child of this shell.
-    # trunk is a direct child of this shell (see the launch above), so `wait` is the right primitive:
-    # it cannot be fooled by a recycled pid the way a `kill -0` poll can, and a signal runs the trap
-    # first, leaving this to return once the trap has stopped trunk.
+    # Stay attached to trunk: rebuilds keep printing here. trunk is a direct child of this shell
+    # (see the launch above), so `wait` is the right primitive: it cannot be fooled by a recycled pid
+    # the way a `kill -0` poll can.
     local status=0
     wait "$TRUNK_PID" || status=$?
     cmd_down "trunk exited (status ${status})"
@@ -388,10 +427,9 @@ EOF
 
 cmd_down() {
   local reason="${1:-stopped by this shell}"
-  # Idempotent: cmd_down runs from the foreground path and, as a safety net, from the EXIT trap, and
-  # both the Ctrl-C path and a dying shell must leave the route and the pids cleaned up exactly once.
+  # Idempotent: cmd_down runs from the foreground path and, as a safety net, from the EXIT trap.
   if [ "${DOWN_DONE:-0}" = "1" ]; then
-    # A signal trap already did the work; still drop the state files so nothing looks "running".
+    # A trap already did the work; still drop the state files so nothing looks "running".
     rm -f "$TRUNK_PID_FILE" "${STATE_DIR}/tail.pid"
     return 0
   fi
@@ -427,7 +465,7 @@ cmd_down() {
   rm -f "$TRUNK_PID_FILE" "${STATE_DIR}/tail.pid"
   if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER"; then
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-    log "fidelity container removed"
+    log "nginx container removed"
   fi
   log "dev environment stopped"
 }
@@ -435,7 +473,15 @@ cmd_down() {
 cmd_status() {
   local port routing
   port="$(web_port)"
-  printf 'mode       : %s\n' "$(use_trunk && echo 'trunk dev server (watch + reload)' || echo 'fidelity container (dist/web)')"
+  local mode
+  if use_dev_nginx; then
+    mode="nginx fronting the dev build (dist/web-dev)"
+  elif use_trunk; then
+    mode="trunk dev server, no container (watch + reload)"
+  else
+    mode="fidelity container (dist/web)"
+  fi
+  printf 'mode       : %s\n' "$mode"
   printf 'port       : %s (%s)\n' "$port" "$(port_in_use "$port" && echo listening || echo 'not listening')"
   printf 'bind addr  : %s (the platform reaches it as %s)\n' "$DEV_BIND_ADDR" "$HOST_GW"
   if tree_running; then printf 'trunk pid  : %s\n' "$(cat "$TRUNK_PID_FILE")"; fi
@@ -475,5 +521,7 @@ case "${1:-up}" in
   route-off) route_off ;;
   route-on) route_on "$(web_port)" ;;
   build-web) build_web ;;
-  *) die "unknown command: $1 (up|down|status|logs|route-on|route-off|build-web)" ;;
+  # Called by apps/photocraft-web/Trunk.vos-dev.toml as a post_build hook.
+  copy-fonts) cmd_copy_fonts ;;
+  *) die "unknown command: $1 (up|down|status|logs|route-on|route-off|build-web|copy-fonts)" ;;
 esac

@@ -1,11 +1,11 @@
 # Trunk configuration for local VOS development.
-# The post_build hook copies configured fonts into each generated site.
 # Trunk resolves build and hook paths relative to this config file.
 # Release image builds use Trunk.toml.
 
 [build]
 target = "index.html"
-dist = "../../dist/web"
+# Separate from the release output (dist/web).
+dist = "../../dist/web-dev"
 public_url = "./"
 filehash = true
 # Select the dev Cargo profile; Trunk skips wasm-opt when release is false.
@@ -20,8 +20,12 @@ port = 8765
 watch = ["../../crates", "../../apps", "../../xtask", "../../Cargo.toml", "../../Cargo.lock"]
 ignore = ["../../target", "../../dist"]
 
+# Both hooks read TRUNK_STAGING_DIR from the environment: trunk builds into dist/web-dev/.stage and
+# moves it into place only after these finish. Trunk runs the post_build hooks CONCURRENTLY, so they
+# must not touch the same files: compress rewrites index.html (and its .gz) and writes every .gz,
+# while fonts only adds files under fonts/.
 [[hooks]]
 stage = "post_build"
 command = "bash"
-# The hook reads TRUNK_STAGING_DIR from the environment.
-command_arguments = ["../../scripts/vos-fonts.sh"]
+# Copies the configured fonts into the built site.
+command_arguments = ["../../scripts/vos-dev.sh", "copy-fonts"]
