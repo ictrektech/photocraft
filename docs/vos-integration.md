@@ -182,6 +182,13 @@ still does the building on the host, which is what keeps the ~16s rebuild; the c
 trunk's auto-reload websocket back to it. Run `VOS_DEV_WEB=2 make vos-dev` to skip the container
 entirely.
 
+Trunk substitutes `{{__TRUNK_ADDRESS__}}` / `{{__TRUNK_WS_BASE__}}` in `index.html` per request, not
+on disk, so the file nginx serves would still hold them and the browser would open a websocket to a
+host literally named `{{__TRUNK_ADDRESS__}}`. The `post_build` hook (`vos-dev.sh compress`, via
+`cmd_wsbase`) rewrites them to `window.location.host` and `/app/com.ictrek.photocraft/` — the
+platform's only reachable path — and the dev config gains a matching second websocket location that
+rewrites onto trunk's own route.
+
 The tools, and which mode needs which:
 
 | Tool | dev (`make vos-dev`, `VOS_DEV_WEB=2`) | fidelity (`VOS_DEV_WEB=0`) |

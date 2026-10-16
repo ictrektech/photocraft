@@ -27,5 +27,12 @@ ignore = ["../../target", "../../dist"]
 [[hooks]]
 stage = "post_build"
 command = "bash"
+# Substitutes trunk's auto-reload placeholders in index.html, then precompresses every file so
+# nginx's gzip_static has a .gz to serve.
+command_arguments = ["../../scripts/vos-dev.sh", "compress"]
+
+[[hooks]]
+stage = "post_build"
+command = "bash"
 # Copies the configured fonts into the built site.
-command_arguments = ["../../scripts/vos-dev.sh", "copy-fonts"]
+command_arguments = ["../../scripts/vos-fonts.sh"]

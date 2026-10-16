@@ -269,13 +269,52 @@ copy_fonts() {
 
 # -------------------------------------------------------------------------- build the site
 
-# Copy the fonts into the built site. A missing font folder is a warning: the site still works, it
-# just has no extra CJK coverage.
-cmd_copy_fonts() {
-  local dest="${TRUNK_STAGING_DIR:-}"
-  [ -n "$dest" ] || die "copy-fonts: TRUNK_STAGING_DIR is not set (this runs as a trunk post_build hook)"
-  PHOTOCRAFT_WEB_FONTS_DIR="${PHOTOCRAFT_WEB_FONTS_DIR:-$(fonts_src)}" \
-    bash "${ROOT_DIR}/scripts/vos-fonts.sh" "$dest"
+# Substitute trunk's auto-reload placeholders in the built index.html. Trunk fills them only per
+# request, so the file on disk keeps `'{{__TRUNK_ADDRESS__}}'` and the browser opens a websocket to a
+# host literally named `{{__TRUNK_ADDRESS__}}`, which never connects. Runs as a post_build hook, so
+# TRUNK_STAGING_DIR holds the site trunk is about to move into place.
+#   address -> window.location.host   the request then carries the page's own host:port
+#   ws base -> /app/<id>/             BASE_PATH: the request has to match Traefik's route for the app
+cmd_wsbase() {
+  local dir="${TRUNK_STAGING_DIR:-}"
+  [ -n "$dir" ] || die "wsbase: TRUNK_STAGING_DIR is not set (this runs as a trunk post_build hook)"
+  [ -d "$dir" ] || die "wsbase: staging directory ${dir} does not exist"
+  local index="${dir}/index.html"
+  [ -f "$index" ] || die "wsbase: ${index} is missing (trunk did not build it?)"
+  if ! grep -q '{{__TRUNK_ADDRESS__}}' "$index" && ! grep -q '{{__TRUNK_WS_BASE__}}' "$index"; then
+    # Nothing to do, but say so: the build may have no autoreloader at all.
+    warn "wsbase: ${index} has no autoreloader placeholder; hot reload will not work through nginx"
+    return 0
+  fi
+  sed -i -e "s|{{__TRUNK_ADDRESS__}}|window.location.host|g" \
+         -e "s|{{__TRUNK_WS_BASE__}}|${BASE_PATH}/|g" "$index" \
+    || die "wsbase: could not substitute the placeholders in ${index}"
+  # gzip_static serves the .gz in preference to index.html, so it has to match.
+  if [ -f "${index}.gz" ]; then
+    local level="${VOS_DEV_GZIP_LEVEL:-6}"
+    gzip -"$level" -k -f -- "$index" \
+      || die "wsbase: could not re-gzip ${index}.gz after the substitution"
+  fi
+  log "autoreloader now targets ws://<page host>${BASE_PATH}/.well-known/trunk/ws"
+}
+
+# Precompress the built site so nginx's `gzip_static on` has a .gz to serve: trunk writes none of its
+# own. Runs as a post_build hook, so TRUNK_STAGING_DIR holds the site trunk is about to move into
+# place. NB: trunk runs the post_build hooks concurrently, so index.html is rewritten here (by
+# cmd_wsbase) rather than in a hook of its own: two processes editing index.html and its .gz would
+# race.
+cmd_compress() {
+  cmd_wsbase
+  local dir="${TRUNK_STAGING_DIR:-}"
+  [ -n "$dir" ] || die "compress: TRUNK_STAGING_DIR is not set (this runs as a trunk post_build hook)"
+  [ -d "$dir" ] || die "compress: staging directory ${dir} does not exist"
+  local level="${VOS_DEV_GZIP_LEVEL:-6}"
+  local count=0 f
+  while IFS= read -r -d '' f; do
+    gzip -"$level" -k -f -- "$f" || die "compress: gzip failed on ${f}"
+    count=$((count + 1))
+  done < <(find "$dir" -type f ! -name '*.gz' -print0)
+  log "precompressed ${count} file(s) with gzip -${level}"
 }
 
 # The same build the deployed image runs, without publishing anything: the Dockerfile's builder
@@ -311,12 +350,58 @@ build_web() {
 # Renders the nginx config the container mounts: the file the published image serves, with the IPv6
 # listener removed. The image strips that line at build time (docker/Dockerfile.vos); a host kernel
 # without IPv6 would otherwise fail the bind with "socket() [::]:8080 failed".
+# $1 = dev adds two locations proxying trunk's auto-reload websocket, which the file's own
+# `location /` would answer with 404:
+#   /app/<id>/.well-known/trunk/ws  the request as Traefik's route delivers it, BASE_PATH kept
+#   /.well-known/trunk/ws           a direct request to the container port, no prefix
+# Trunk serves the route at /.well-known/trunk/ws and nothing else, so the prefixed location has to
+# rewrite: forwarding the path unchanged makes trunk answer with index.html instead of the handshake.
 render_nginx_conf() {
   local mode="$1"
   sed '/listen \[::\]:8080;/d' packaging/web/nginx.conf > "${STATE_DIR}/nginx.conf"
   if grep -q 'listen \[::\]:8080;' "${STATE_DIR}/nginx.conf"; then
     die "could not strip the IPv6 listener from packaging/web/nginx.conf; the nginx container would not start"
   fi
+  if [ "$mode" != "dev" ]; then
+    return 0
+  fi
+  # Inserted before the server block's closing brace, the only line in the file that is exactly four
+  # spaces followed by a brace.
+  cat > "${STATE_DIR}/trunk-ws.location" <<EOF
+        # Trunk serves the websocket at /.well-known/trunk/ws only, so the prefixed location must
+        # rewrite: a proxy_pass with a URI replaces the matched location prefix, which turns
+        # /app/<id>/.well-known/trunk/ws into /.well-known/trunk/ws.
+        # The read/send timeouts matter as much as the upgrade headers: nginx defaults both to 60s,
+        # which drops an idle connection, and this one is idle by design.
+        location = /.well-known/trunk/ws {
+            proxy_pass http://host.docker.internal:${DEV_PORT};
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+        }
+
+        location = ${BASE_PATH}/.well-known/trunk/ws {
+            proxy_pass http://host.docker.internal:${DEV_PORT}/.well-known/trunk/ws;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade \$http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+        }
+EOF
+  awk -v wsfile="${STATE_DIR}/trunk-ws.location" '
+    BEGIN { while ((getline line < wsfile) > 0) ws = ws line "\n" }
+    /^    }$/ && !done { printf "%s", ws; done = 1 }
+    { print }
+  ' "${STATE_DIR}/nginx.conf" > "${STATE_DIR}/nginx.conf.new"
+  mv "${STATE_DIR}/nginx.conf.new" "${STATE_DIR}/nginx.conf"
+  rm -f "${STATE_DIR}/trunk-ws.location"
+  grep -q 'well-known/trunk/ws' "${STATE_DIR}/nginx.conf" \
+    || die "could not add the trunk websocket locations to the dev nginx config"
+  grep -q "location = ${BASE_PATH}/.well-known/trunk/ws" "${STATE_DIR}/nginx.conf" \
+    || die "could not add the prefixed trunk websocket location (${BASE_PATH}) to the dev nginx config"
 }
 
 # Renders docker/vos-dev/docker-compose.yml into the state dir, where its relative paths resolve.
@@ -522,6 +607,7 @@ case "${1:-up}" in
   route-on) route_on "$(web_port)" ;;
   build-web) build_web ;;
   # Called by apps/photocraft-web/Trunk.vos-dev.toml as a post_build hook.
-  copy-fonts) cmd_copy_fonts ;;
-  *) die "unknown command: $1 (up|down|status|logs|route-on|route-off|build-web|copy-fonts)" ;;
+  compress) cmd_compress ;;
+  wsbase) cmd_wsbase ;;
+  *) die "unknown command: $1 (up|down|status|logs|route-on|route-off|build-web|compress|wsbase)" ;;
 esac
