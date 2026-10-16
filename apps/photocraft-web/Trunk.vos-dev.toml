@@ -1,33 +1,27 @@
-# Trunk configuration for `make vos-dev` (VOS local development).
-#
-# This is the upstream Trunk.toml with one addition: a `post_build` hook that re-adds the served
-# fonts. Trunk rebuilds by wiping and replacing its whole dist directory, so files copied there once
-# disappear on the next rebuild; the hook re-adds them every time. See
-# https://trunk-rs.github.io/trunk/guides/dev-server.html and scripts/vos-fonts.sh.
-#
-# It must live next to index.html: trunk resolves `target`, `dist` and the hook's working directory
-# relative to the **config file's** directory, not the shell's cwd. `make vos-dev` passes it with
-# `--config Trunk.vos-dev.toml`; a config kept outside this directory fails with
-# "error getting the canonical path to the build target HTML file".
-#
-# The upstream Trunk.toml is untouched, so `trunk build --release` behaves exactly as before; the
-# deployed image uses that path (docker/Dockerfile.vos) and does not run this hook.
+# Trunk configuration for local VOS development.
+# The post_build hook copies configured fonts into each generated site.
+# Trunk resolves build and hook paths relative to this config file.
+# Release image builds use Trunk.toml.
 
 [build]
 target = "index.html"
 dist = "../../dist/web"
 public_url = "./"
 filehash = true
+# Select the dev Cargo profile; Trunk skips wasm-opt when release is false.
+release = false
 
 [serve]
 addresses = ["127.0.0.1"]
 port = 8765
 
+# Watch workspace source and build files; ignore generated output directories.
+[watch]
+watch = ["../../crates", "../../apps", "../../xtask", "../../Cargo.toml", "../../Cargo.lock"]
+ignore = ["../../target", "../../dist"]
+
 [[hooks]]
 stage = "post_build"
 command = "bash"
-# Resolved against the working directory, which is this file's directory. No arguments on purpose:
-# trunk hands `command_arguments` to the process without shell expansion (a "$TRUNK_STAGING_DIR"
-# here would arrive literally), and it already exports TRUNK_STAGING_DIR into the hook's
-# environment, which scripts/vos-fonts.sh reads.
+# The hook reads TRUNK_STAGING_DIR from the environment.
 command_arguments = ["../../scripts/vos-fonts.sh"]

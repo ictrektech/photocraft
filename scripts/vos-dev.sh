@@ -16,6 +16,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# Reuse the workspace Cargo build cache.
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${ROOT_DIR}/target}"
+
+# Keep Cargo incremental compilation enabled for the dev server.
+export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-1}"
+
 APP_ID="com.ictrek.photocraft"
 BASE_PATH="/app/${APP_ID}"
 DEV_PORT="${VOS_DEV_PORT:-38092}"           # trunk dev server
