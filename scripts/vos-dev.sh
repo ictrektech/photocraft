@@ -231,15 +231,37 @@ preflight_build_tools() {
       VOS_DEV_WEB=0 make vos-dev
   To skip this check: VOS_DEV_SKIP_TOOL_CHECK=1"
   fi
+  # trunk: index.html selects the Cargo profile with `data-cargo-profile-release` / `-dev`. A trunk
+  # that predates those attributes passes no profile at all, so cargo falls back to the default `dev`
+  # profile: the build succeeds, just not with the intended one.
+  if have trunk; then
+    local got
+    got="$(trunk --version 2>/dev/null | awk '{print $2}')"
+    if [ "$got" != "$TRUNK_VERSION" ]; then
+      die "trunk ${got:-<none>} is installed, but this project pins ${TRUNK_VERSION}: index.html's
+  data-cargo-profile-release/-dev attributes need it, and an older trunk would silently build the
+  default dev profile instead of wasm-dev. Install the pinned version:
+      cargo install trunk --version ${TRUNK_VERSION} --locked
+  To skip this check: VOS_DEV_SKIP_TOOL_CHECK=1"
+    fi
+  fi
   # wasm-bindgen: needed in both modes. Without it on PATH, trunk downloads its own copy on first
   # use (about 8 MB; minutes on a slow link). The version must match the wasm-bindgen pin in
   # Cargo.lock, or trunk ignores the system binary and downloads one anyway.
-  local want
+  local want got
   want="$(grep -A1 "^name = \\"wasm-bindgen\\"$" Cargo.lock 2>/dev/null | grep -m1 '^version' | cut -d'"' -f2 || true)"
-  if [ -n "${want}" ] && ! command -v wasm-bindgen >/dev/null 2>&1; then
-    warn "wasm-bindgen is not on PATH, so trunk will download its own build of one (about 8 MB)."
-    warn "The faster route (what the upstream Docker build also does):"
-    warn "    cargo install wasm-bindgen-cli --version ${want} --locked"
+  if [ -n "${want}" ]; then
+    if ! have wasm-bindgen; then
+      warn "wasm-bindgen is not on PATH, so trunk will download its own build of one (about 8 MB)."
+      warn "The faster route (what the upstream Docker build also does):"
+      warn "    cargo install wasm-bindgen-cli --version ${want} --locked"
+    else
+      got="$(wasm-bindgen --version 2>/dev/null | awk '{print $2}')"
+      if [ "$got" != "$want" ]; then
+        warn "wasm-bindgen ${got} is installed but Cargo.lock pins ${want}; trunk will download its own."
+        warn "    cargo install wasm-bindgen-cli --version ${want} --locked"
+      fi
+    fi
   fi
 }
 

@@ -194,8 +194,14 @@ The tools, and which mode needs which:
 | Tool | dev (`make vos-dev`, `VOS_DEV_WEB=2`) | fidelity (`VOS_DEV_WEB=0`) |
 | --- | --- | --- |
 | `wasm32-unknown-unknown` target | needed | needs only Docker |
+| Docker | needed by `make vos-dev`; not by `VOS_DEV_WEB=2` | needed |
 | `wasm-bindgen` (0.2.129) | needed; `cargo install wasm-bindgen-cli --version 0.2.129 --locked` avoids trunk's own 8 MB download | inside the image |
 | `wasm-opt` / binaryen (114 MB) | **not needed** — trunk skips it outside a release build | inside the image, installed at toolchain-build time through the accelerator |
+
+`scripts/vos-dev.sh` checks the trunk and `wasm-bindgen` versions before starting: `index.html`
+selects the Cargo profile with `data-cargo-profile-release` / `-dev`, which a trunk too old to read
+ignores, so cargo would fall back to the default `dev` profile instead of `wasm-dev`.
+`VOS_DEV_SKIP_TOOL_CHECK=1` bypasses both checks.
 
 Fidelity mode needs no host Rust toolchain at all: `make vos-dev-web` builds `dist/web` through the
 image's build stage, which needs only Docker — and it warns first if `wasm-opt` is missing, with the
