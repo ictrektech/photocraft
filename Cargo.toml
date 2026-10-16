@@ -88,6 +88,15 @@ codegen-units = 1
 # and compositing). Dependencies stay at "s": at "z" the whole wasm grows (by 0.4 MB, measured).
 # panic stays the target default (wasm32-unknown-unknown aborts; AGENTS.md's `panic = "unwind"`
 # is for the native app shell). packaging/web/package.sh fails the build above 24 MiB.
+# Cargo profile for local WebAssembly development builds.
+# Inherits dev settings, including workspace dependency optimization overrides.
+[profile.wasm-dev]
+inherits = "dev"
+lto = false
+codegen-units = 16
+# Omit debug information from the development WebAssembly.
+debug = 0
+
 [profile.wasm-release]
 inherits = "release"
 opt-level = "z"
