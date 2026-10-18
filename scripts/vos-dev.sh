@@ -107,8 +107,13 @@ port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
 ensure_port_free() {
   if port_in_use "$1"; then
-    die "port $1 is already in use (a stale trunk or container?).
-  Free it, or pick another port: VOS_DEV_PORT=38094 make vos-dev (or VOS_DEV_DIST_PORT=38095)."
+    # 顺便报出占用者：最常见的原因是上次运行在装上 trap 之前就退出了，留下的 trunk 还占着端口；只说
+    # "已被占用"，读者还得自己找是哪个进程。
+    local holder
+    holder="$(lsof -t -i:"$1" 2>/dev/null | tr '\n' ' ' || true)"
+    die "port $1 is already in use${holder:+ (pid ${holder% })}
+  Stop it (make vos-dev-down, or kill that pid), or pick another port:
+  VOS_DEV_PORT=38094 make vos-dev (or VOS_DEV_DIST_PORT=38095)."
   fi
 }
 
@@ -116,8 +121,26 @@ ensure_port_free() {
 # once when its command line ends in `&`, so `wait` would return immediately.
 pid_alive() { kill -0 "$1" 2>/dev/null; }
 tree_running() { [ -f "$TRUNK_PID_FILE" ] && pid_alive "$(cat "$TRUNK_PID_FILE")"; }
-pid_in_file() { cat "$TRUNK_PID_FILE" 2>/dev/null || printf ''; }
 
+# 结束还占着开发端口、但已经没有 pid 文件的 trunk（上次运行在装上 trap 之前就退出了）。范围刻意收窄：
+# 进程必须是 trunk，且工作目录必须是这个检出，这样一个被别的 worktree 用同一端口启动的 trunk 只会被
+# 报告而不会被杀。端口上别的进程同样只报告。
+stop_stray_trunk() {
+  port_in_use "$DEV_PORT" || return 0
+  local pid exe cmd cwd
+  for pid in $(lsof -t -i:"$DEV_PORT" 2>/dev/null || true); do
+    exe="$(basename "$(ps -p "$pid" -o comm= 2>/dev/null || true)")"
+    cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1 || true)"
+    if [ "$exe" = trunk ] && [ "$cwd" = "$ROOT_DIR" ]; then
+      kill "$pid" 2>/dev/null || true
+      log "stopped a leftover trunk holding port ${DEV_PORT} (pid ${pid})"
+    else
+      warn "port ${DEV_PORT} is held by pid ${pid} (${cmd:-unknown command}) from ${cwd:-an unknown directory}; not ours to stop. Stop it, or use VOS_DEV_PORT=38094 make vos-dev."
+    fi
+  done
+}
+pid_in_file() { cat "$TRUNK_PID_FILE" 2>/dev/null || printf ''; }
 
 # ------------------------------------------------------------------------------ Traefik route
 
@@ -186,7 +209,7 @@ route_off() {
 # the first build error instead of sitting silent until the timeout (trunk keeps serving 404s after a
 # failed build, so "the port answers" is not enough).
 wait_for_http() {
-  local url="$1" what="$2" waited=0 code="" hinted=0 last=""
+  local url="$1" what="$2" waited=0 code="" hinted=0 last="" step=""
   log "waiting for ${what} (the first build takes minutes; the build output is above)"
   while (( waited < HEALTH_TIMEOUT )); do
     code="$(curl -o /dev/null -s -w '%{http_code}' --max-time 3 "${url}" 2>/dev/null || true)"
@@ -205,11 +228,15 @@ wait_for_http() {
     fi
     sleep 2
     waited=$((waited + 2))
+    # 每 15 秒一次（计数器每次加 2，所以第一次命中在 14 秒）。
     if (( waited % 15 == 0 )); then
       # Say what trunk is busy with (downloading a tool, optimising) instead of only echoing the last
       # line: those steps take minutes on a slow link and look like a hang otherwise.
-      step="$(grep -E "downloading |Compiling |optimizing|wasm-opt" "${TRUNK_LOG}" 2>/dev/null | tail -n 1 | tr -d '\r' | cut -c1-120)"
-      last="$(tail -n 1 "${TRUNK_LOG}" 2>/dev/null | tr -d '\r' | cut -c1-120)"
+      # 这里的每个替换都以 `|| true` 结尾：在 `set -euo pipefail` 下，没匹配到任何东西的 `grep`（缓存命中的
+      # 构建没有 "Compiling" 行，所以它常什么都不匹配）会静默地退出整个脚本——之前正是一次运行就这样
+      # 一个字都没打印就死掉了。
+      step="$(grep -E "downloading |Compiling |optimizing|wasm-opt" "${TRUNK_LOG}" 2>/dev/null | tail -n 1 | tr -d '\r' | cut -c1-120 || true)"
+      last="$(tail -n 1 "${TRUNK_LOG}" 2>/dev/null | tr -d '\r' | cut -c1-120 || true)"
       log "still waiting (${waited}s of ${HEALTH_TIMEOUT}s; HTTP ${code:-none}): ${step:-${last:-<no output yet>}}"
     fi
   done
@@ -441,8 +468,19 @@ render_compose() {
 start_trunk() {
   have trunk || die "trunk is not installed (cargo install trunk --locked); or use VOS_DEV_WEB=0 make vos-dev"
   tree_running && die "a trunk dev server is already running (pid $(pid_in_file)); make vos-dev-down first"
+  # 在装上 trap 之前就退出的那次运行会留下一个还占着端口、却没有 pid 文件的 trunk。这里也清掉这种情况，
+  # 让 `make vos-dev` 自己恢复，而不是让读者去翻 pid。
+  stop_stray_trunk
   ensure_port_free "$DEV_PORT"
   preflight_build_tools
+  # trunk 0.21 把 NO_COLOR 当成 clap 的开关（"--no-color"）并且只接受 true/false，所以 dotfile 或 CI 镜像
+  # 里常见的 `NO_COLOR=1` 会让 `trunk serve` 在开始构建之前就失败：
+  #     error: invalid value '1' for '--no-color'
+  # 开发日志是要 tail 的文件，颜色在那里本来就是噪音。这里改成 trunk 接受的值，只有环境确实要求关掉
+  # 颜色时才把输出重定向到 "never"。
+  if [ -n "${NO_COLOR:-}" ] && [ "${NO_COLOR}" != "true" ] && [ "${NO_COLOR}" != "false" ]; then
+    export NO_COLOR=true
+  fi
   log "starting trunk serve on ${DEV_BIND_ADDR}:${DEV_PORT} (watch + auto reload)"
   log "the platform reaches it as http://${HOST_GW}:${DEV_PORT}; binding to loopback instead would make
   every request through Traefik a 502"
@@ -481,6 +519,12 @@ cmd_up() {
   local port
   port="$(web_port)"
   mkdir -p "$STATE_DIR"
+  # 在启动任何东西之前就装好清理。启动是最危险的窗口：第一次构建可能在 wait_for_http 里跑好几分钟，
+  # 在那里按 Ctrl-C 是最常见的退出方式；如果 trap 等到服务器起来才装，trunk 就会被留下——下一次运行
+  # 死在 "port already in use"，而平台还在悄悄地把流量发给已安装的版本。cmd_down 是幂等的，也能容忍
+  # 起了一半的环境（没东西可杀，也没有路由要删）。
+  trap 'cmd_down "interrupted"' INT TERM HUP
+  trap 'cmd_down "shell exiting"' EXIT
 
   if use_dev_nginx; then
     start_trunk
@@ -514,11 +558,6 @@ EOF
 
   if use_trunk || use_dev_nginx; then
     log "trunk is serving (its output is above); Ctrl-C removes the temporary route and stops it"
-    # INT/TERM/HUP for the usual Ctrl-C and kill paths; EXIT so a shell that dies some other way
-    # still removes the temporary route, which would otherwise keep sending the platform to a dev
-    # server that is no longer running.
-    trap 'cmd_down "interrupted"' INT TERM HUP
-    trap 'cmd_down "shell exiting"' EXIT
     # Stay attached to trunk: rebuilds keep printing here. trunk is a direct child of this shell
     # (see the launch above), so `wait` is the right primitive: it cannot be fooled by a recycled pid
     # the way a `kill -0` poll can.
@@ -527,7 +566,6 @@ EOF
     cmd_down "trunk exited (status ${status})"
   else
     log "fidelity container logs (Ctrl-C leaves it running; stop it with make vos-dev-down)"
-    trap 'cmd_down "shell exiting"' EXIT
     docker logs -f "$CONTAINER" 2>/dev/null || true
   fi
 }
@@ -570,6 +608,9 @@ cmd_down() {
   fi
   TRUNK_PID=""
   rm -f "$TRUNK_PID_FILE" "${STATE_DIR}/tail.pid"
+  # 比 pid 文件活得久的 trunk 还占着端口，下一次 `up` 就死在 "port already in use"，而且没有东西可清理。
+  # 停掉还在监听的那个进程，但只在它确实是 trunk 时（端口上无关的服务不归我们杀）。
+  stop_stray_trunk
   if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER"; then
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
     log "nginx container removed"
