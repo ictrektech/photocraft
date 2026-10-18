@@ -19,6 +19,11 @@
 #[cfg(any(target_arch = "wasm32", test))]
 mod preset_bridge;
 
+// VOS 存储插件（Finder 打开/保存）。同时为 `test` 和 `wasm32` 编译，好让它的纯模块
+// （`vos::path`、`vos::model`）能在宿主机上被 `cargo test -p photocraft-web` 跑到。
+#[cfg(any(target_arch = "wasm32", test))]
+mod vos;
+
 #[cfg(target_arch = "wasm32")]
 mod indexed_presets;
 

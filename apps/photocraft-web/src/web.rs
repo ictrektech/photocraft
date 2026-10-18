@@ -16,7 +16,7 @@ type Inbox = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
 /// Everything File › Open reads: PhotoCraft, Photoshop, OpenRaster and Affinity documents, flat images, and
 /// Photoshop brushes (.abr), gradients (.grd) and swatches (.aco, .ase), which go to the preset libraries.
-const OPEN_EXTS: &[&str] = &[
+pub(crate) const OPEN_EXTS: &[&str] = &[
     "pcraft", "pdn", "ora", "psd", "psb", "psdt", "png", "jpg", "jpeg", "tif", "tiff", "webp", "gif", "bmp", "tga", "ico", "qoi", "exr", "hdr", "pbm", "pgm",
     "ppm", "pam", "pfm", "fits", "fit", "fts", "heic", "heif", "hif", "dng", "cr2", "cr3", "nef", "nrw", "arw", "pef", "orf", "rw2", "raf", "abr", "grd",
     "svg", "svgz", "aco", "ase", "af", "afdesign", "afphoto", "afpub",
@@ -83,7 +83,10 @@ pub fn start() {
                     load_font_manifest(served.clone(), cc.egui_ctx.clone());
                     let (session, warnings) = crate::preset_bridge::session(presets.clone());
                     preset_warnings.extend(warnings);
-                    let mut app = PhotocraftApp::new(session, services(inbox.clone()));
+                    // 用 VOS 的 Finder 服务覆盖浏览器的文件对话框。
+                    let mut platform = services(inbox.clone());
+                    crate::vos::install(&mut platform);
+                    let mut app = PhotocraftApp::new(session, platform);
                     if !preset_warnings.is_empty() {
                         photocraft_ui_egui::notices::post(&mut app, i18n::t("Some brush presets could not be loaded"), preset_warnings, true, None);
                     }
@@ -324,6 +327,9 @@ impl eframe::App for WebShell {
             });
         }
         self.app.ui(ui, frame);
+        // Finder 选择器是插件自己的窗口：画在 app 之上，并让它回答外壳这一帧打开的任何对话框。
+
+        crate::vos::ui(&mut self.app, ui.ctx());
         self.save_presets(ui.ctx());
     }
 }

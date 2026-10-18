@@ -127,6 +127,33 @@ failing check prints the fix instead of leaving you with a blank 502.
 The script never touches the installed app's containers (the platform reconciles them every 60
 seconds); it only adds and removes `/etc/traefik/dynamic-conf/com.ictrek.photocraft.dev.yml`.
 
+**When the platform shows its own copy, nothing is broken — check `make vos-dev-status` first.** Two
+ways to end up there, both now handled by the script:
+
+- The route file is written only once the dev server answers, and removed on exit. Ctrl-C during the
+  first build (minutes long) used to leave `trunk serve` running with the route already gone, so the
+  platform served the installed app while the next `make vos-dev` died on "port already in use". The
+  cleanup traps are now installed before anything starts, and `vos-dev-down` / the next `up` stop a
+  leftover trunk whose working directory is **this** checkout (a trunk from another worktree on the
+  same port is reported, not killed).
+- `NO_COLOR=1` (common in dotfiles and CI images) makes trunk 0.21 exit immediately — it reads the
+  variable as the `--no-color` flag, which only accepts `true`/`false`. The script normalises it
+  before launching trunk, so `make vos-dev` works with it set.
+- A **cached** build makes the script exit 1 in silence, 15 s in, with no `still waiting` line. The
+  progress branch in `wait_for_http` reads the build log through `grep`, and a cached build has no
+  `Compiling` line, so grep finds nothing; under `set -euo pipefail` that non-match propagated and
+  killed the script. Every such substitution now ends in `|| true`. The symptom to recognise:
+  `📦 starting build` then `Finished wasm-dev profile … in 0.3s`, then the route is removed and the
+  shell exits 1. If you see it after editing this script, check for a substitution without
+  `|| true` before assuming trunk failed.
+
+If the page still looks like the installed app, compare the hashed bundle name:
+
+```bash
+curl -sk https://127.0.0.1:1180/app/com.ictrek.photocraft/ | grep -o 'photocraft-web-[a-f0-9]*' | head -1
+ls dist/web-dev/photocraft-web-*_bg.wasm    # the build the dev server serves
+```
+
 **Fonts.** The web build embeds no CJK fonts; the site fetches `fonts/manifest.txt` next to
 `index.html` (see `crates/ui-egui/src/served_fonts.rs`). Point `CRAFT_FONTS_DIR` (or
 `PHOTOCRAFT_WEB_FONTS_DIR`) at a craft-fonts checkout and they are served; without one the page
@@ -353,6 +380,7 @@ only core change this phase makes.
 | `vos/path.rs` | The `<adapter>://<dir>/<name>` grammar, pure and host-tested |
 | `vos/model.rs` | Finder reply decoding and the error-code wording, pure and host-tested |
 | `vos/state.rs` | The picker's state machine, pure and host-tested |
+| `vos/crypto.rs` | base64url + SHA-256 in Rust (the PKCE digest), pure and host-tested |
 | `vos/bridge.rs` | `window.vos_platform` detection, PKCE, per-tab token cache |
 | `vos/http.rs` | `fetch` wrappers for `index` / `download` / `upload` / the volume list |
 | `vos/recent.rs` | The documents VOS holds, newest first, pure and host-tested |
@@ -365,12 +393,53 @@ client declared in `ictrek.app/src/manifest.yml`). The app's own access token ca
 permission codes, so Finder calls run **as the signed-in user** and the platform enforces RBAC;
 the platform's JWT is never read. The token lives in `sessionStorage` for the tab.
 
+Two things about that flow are worth keeping in mind:
+
+- **The S256 challenge is computed in Rust** (`vos/crypto.rs`), not with `crypto.subtle`. `subtle`
+  only exists in a secure context, so a box reached over plain `http://` (the usual first contact
+  with a LAN VOS install) has `window.crypto` but no `crypto.subtle`, and the first sign-in used to
+  fail with "Cannot read properties of undefined (reading 'digest')" before the platform was even
+  asked. `crypto.getRandomValues`, which supplies the verifier, is not restricted that way.
+- **The bridge's promises belong to the parent frame.** Its functions are created in the platform
+  page and only injected into the iframe's `window`, so their promise fails an `instanceof Promise`
+  test (what `dyn_into` uses). Every call goes through `bridge::call`, which adopts the thenable
+  with `js_sys::Promise::resolve` and returns a promise of our own realm.
+
 **Behaviour without VOS.** `install` checks for the bridge and does nothing when it is absent, so
 a local `trunk serve` or a directly-opened page keeps the browser picker and the download.
 
 **Saving.** A Finder path becomes the document's path, so Ctrl+S writes back to the same file
 (`saves_in_place` accepts `.psd`/`.psb`/`.pcraft`/`.ora`). Uploads send
 `conflict_strategy=overwrite`, because the platform's default rejects an existing name.
+
+### Where a document lands, and the one row the picker needs
+
+Nothing is stored by this app: a saved document goes straight back through
+`POST /v1000/finder_next/upload` to the platform backend, which writes it to
+
+```text
+{mount_point}/users/{username}/data/<subdir>/<name>.psd
+```
+
+i.e. `/share/<volume_uuid>/users/<username>/data/…` with the default layout. So uninstall,
+upgrade or a container restart never touches it, it shows up in the platform's own 文件服务, and
+it counts against that user's per-volume quota. The image has no volume of its own — it is nginx
+serving static files — so there is nothing local to lose.
+
+The picker lists volumes from `POST /v1000/nas/users/volumes/list`, which reads the
+`vos_nas_user_volume` join table. **That table is what actually gates the feature**: with no row,
+every user gets `total: 0`, and every Finder call answers `10045 无效的文件访问入口` — note that on
+this box `10045` means "no volume share yet", not "no permission". Grant one as an administrator
+(system_admin / storage_admin, idempotent):
+
+```sh
+curl -sk https://127.0.0.1:1180/v1000/nas/volumes/shares/create \
+  -H 'Authorization: Bearer <admin token>' -H 'Content-Type: application/json' \
+  -d '{"volume_uuid":"<uuid>","user_ids":["<user id>"]}'
+```
+
+`POST /v1000/nas/volumes/user-directory` then reports the `data_path` that uploads will use,
+which is the quickest way to confirm the share took effect.
 
 ### The Home screen
 
@@ -386,7 +455,7 @@ generic enough to carry upstream:
 | Item | Role |
 | --- | --- |
 | `Services::platform_files` | Returns a `PlatformListing` (heading, an optional browse row, the files) for the Home screen. |
-| `Services::platform_open` | Receives a `PlatformRequest` (`Open(id)` or `Browse`) when a row is clicked. |
+| `Services::platform_open` | Receives a `PlatformRequest` (`Open(id)`, `Browse`, or `Forget(id)` from a row's ×) when a row is clicked. |
 | `PlatformFile` / `PlatformListing` / `PlatformRequest` | The data: an opaque `id` the shell hands straight back, a `name`, and a `detail` line. |
 | `canvas.rs::home_platform` | Draws the section; it owns no state and does no I/O. |
 
@@ -404,6 +473,13 @@ File > Open Recent (the web cannot reopen one), leaving the Home list as the web
 A failed upload used to be silent: the plugin's `write` wrapper takes the bytes and returns `Ok`
 so the engine marks the document clean, while the upload's own failure only reached the log. It
 now reports through `app.ui.status`/`status_error` and `notices::error`.
+
+Uploads of the same path are ordered: a save staged while an older upload of that file is still
+out waits for it, so an older copy can never land on top of a newer one. A save that lands
+during an upload cancels the failure report of the one before it (the newer copy is still coming).
+
+A `10001` (expired session) is retried once with a fresh token by every Finder call, including
+the download and the upload, which used to dead-end in "sign in again and retry".
 
 ### Why Finder and not the exposed-path grant (数据访问控制)
 

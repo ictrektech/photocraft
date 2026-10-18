@@ -26,6 +26,10 @@ photocraft-doc = { workspace = true }
 photocraft-ui-egui = { workspace = true }
 egui = { workspace = true }
 log = { workspace = true }
+# VOS Finder 插件（src/vos/）：解码 `ResultBody` 回复信封和最近列表，拼装请求体。宿主机上也要用：
+# 插件的纯模块（路径、回复解码、PKCE 摘要）都在那里测试。
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # `wgpu` pulls egui-wgpu's defaults: WebGPU plus the WebGL2 fallback.
@@ -34,9 +38,11 @@ rfd = { workspace = true }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "HtmlAnchorElement", "Blob", "BlobPropertyBag", "Url", "Location", "CssStyleDeclaration", "Storage", "Event", "EventTarget", "MouseEvent", "PointerEvent", "BeforeUnloadEvent", "AbortController", "AbortSignal", "DomException", "Response", "IdbFactory", "IdbOpenDbRequest", "IdbDatabase", "IdbRequest", "IdbTransaction", "IdbTransactionMode", "IdbObjectStore", "IdbCursor", "IdbCursorWithValue", "RequestInit", "Navigator"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "HtmlAnchorElement", "Blob", "BlobPropertyBag", "Url", "Location", "CssStyleDeclaration", "Storage", "Event", "EventTarget", "MouseEvent", "PointerEvent", "BeforeUnloadEvent", "AbortController", "AbortSignal", "DomException", "Response", "IdbFactory", "IdbOpenDbRequest", "IdbDatabase", "IdbRequest", "IdbTransaction", "IdbTransactionMode", "IdbObjectStore", "IdbCursor", "IdbCursorWithValue", "RequestInit", "Navigator",
+    # VOS 插件（src/vos/）：PKCE 的 verifier 来自 `crypto.getRandomValues`（摘要用 Rust 算，见
+    # vos/crypto.rs），令牌缓存在 sessionStorage，Finder 调用用 fetch 配 Request/Headers/FormData。
+    "Crypto", "FormData", "Request", "Headers"] }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 photocraft-paint = { workspace = true }
 photocraft-psd = { workspace = true }
