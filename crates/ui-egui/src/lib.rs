@@ -361,6 +361,45 @@ pub type CapsLockFn = Box<dyn FnMut() -> bool>;
 /// Keeps an undecorated window's OS frame from offsetting its content and pointer (#2246).
 /// Called once per frame; `None` when the window is decorated or the platform needs no fixing.
 pub type WindowFrameFn = Box<dyn FnMut()>;
+/// 平台存储能列出、并能在没有本地路径的情况下加载的一个文件（web 端的 VOS 存储）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlatformFile {
+    /// 文件在平台存储里的路径（`v_abc://pics/poster.psd`）：打开它时原样交回
+    /// [`Services::platform_open`]，`detail` 说不全时悬停也会显示。
+    pub id: String,
+    /// 首页显示的名字（"poster.psd"）。
+    pub name: String,
+    /// 它所在的位置，以淡色显示在名字旁边（"v_abc://pics"）。
+    pub detail: String,
+}
+
+/// 首页为平台存储显示的内容：一个标题、一行可选的"浏览"，以及最近的文件。由 [`PlatformFilesFn`]
+/// 返回。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlatformListing {
+    /// 列表上方的标题（"VOS storage"）。
+    pub heading: String,
+    /// 打开平台自带浏览界面的那一行的文字；`None` 表示不提供这一行。
+    pub browse: Option<String>,
+    /// 要列出的文件，最新的在前。
+    pub files: Vec<PlatformFile>,
+}
+
+/// 首页请平台存储做的事（见 [`Services::platform_open`]）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlatformRequest {
+    /// 打开这个 [`PlatformFile::id`] 对应的文件。
+    Open(String),
+    /// 打开平台自带的浏览界面。
+    Browse,
+    /// 把这份 [`PlatformFile::id`] 的文件从首页移除；文件本身仍留在存储里。
+    Forget(String),
+}
+/// 平台存储能为首页列出的文件（见 [`PlatformListing`]）。每帧调用一次；`None`（桌面端）时首页
+/// 只用最近文件。
+pub type PlatformFilesFn = Box<dyn FnMut() -> PlatformListing>;
+/// 处理首页上针对平台存储的一次点击（见 [`PlatformRequest`]）。
+pub type PlatformOpenFn = Box<dyn FnMut(PlatformRequest)>;
 
 /// Platform services injected by the app binary (file dialogs, codecs), keeping this crate free of
 /// I/O dependencies.
@@ -377,7 +416,8 @@ pub struct Services {
     pub automation_save: Option<SaveFileFn>,
     /// Show an Open or Save dialog without waiting for it (see `file_dialog`).
     pub file_dialog: Option<FileDialogFn>,
-    /// Write bytes to a path (native) or trigger a download (web).
+    /// 把字节写到路径（原生端），或触发一次下载（web 端）。返回时字节已经安全存好：只有返回 `Ok`，
+    /// 外壳才会记下这次保存。
     pub write: Option<WriteFn>,
     /// Encode and write in one step on a worker thread, so a large save doesn't freeze the
     /// window (#2017). With background jobs on, saves use it instead of `export` and `write`.
@@ -437,6 +477,11 @@ pub struct Services {
     /// (Windows custom title bar, #2246). Called once per frame; `None` when the window is
     /// decorated or the platform needs no fixing.
     pub window_frame: Option<WindowFrameFn>,
+    /// 首页要列出的平台存储（web 端的 VOS 存储）。桌面端为 `None`，那里的最近文件是本地路径。
+    /// 与 [`Self::platform_open`] 一起设置。
+    pub platform_files: Option<PlatformFilesFn>,
+    /// 处理首页上针对 [`Self::platform_files`] 的点击。没有它时列表只是只读的。
+    pub platform_open: Option<PlatformOpenFn>,
     /// The persistent brush preset store, loading in the background (desktop; see
     /// `photocraft_engine::preset_store`). Attached to the session once it arrives; without
     /// one, brush presets are session-only unless the shell attached a store before startup.

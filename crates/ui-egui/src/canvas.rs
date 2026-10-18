@@ -9,8 +9,8 @@ use photocraft_doc::{Document, LayerContent};
 use photocraft_geom::Rect as DRect;
 use serde_json::json;
 
-use crate::PhotocraftApp;
 use crate::state::{Tool, View};
+use crate::{PhotocraftApp, PlatformListing, PlatformRequest};
 
 /// Largest texture side we upload; bigger documents display downsampled until the GPU path lands.
 pub const MAX_TEXTURE: u32 = 4096;
@@ -2370,10 +2370,12 @@ fn start_screen(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = crate::theme::Tokens::get(ui.ctx());
     let area = ui.available_rect_before_wrap();
     paint_dots(ui, area, app.session.prefs().interface.show_canvas_dots);
-    // File › Open Recent, newest first (on the web there are no paths to reopen).
+    // 只问一次，这样卡片就能按这个区块要放的内容来定尺寸。
+    let platform = platform_files(app);
+    // 文件 › 最近打开，最新的在前（web 端没有可以重开的本地路径）。
     let recent: Vec<String> = if cfg!(target_arch = "wasm32") { Vec::new() } else { app.ui.recent_files.iter().take(HOME_RECENT).cloned().collect() };
-    let recent_h = if recent.is_empty() { 0.0 } else { 34.0 + recent.len() as f32 * HOME_RECENT_ROW };
-    let card = Rect::from_center_size(area.center(), egui::vec2(460.0, 330.0 + recent_h));
+    let sections_h = home_section_height(recent.len()) + platform.as_ref().map_or(0.0, |l| home_section_height(home_platform_rows(l)));
+    let card = Rect::from_center_size(area.center(), egui::vec2(460.0, 330.0 + sections_h));
     let new_label = crate::shortcuts::command_label(app, "New document…", "file.new");
     let open_label = crate::shortcuts::command_label(app, "Open…", "file.open");
     ui.scope_builder(egui::UiBuilder::new().max_rect(card), |ui| {
@@ -2411,8 +2413,12 @@ fn start_screen(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 crate::icons::paint(ui, r, "image", 15.0, t.text_faint);
                 ui.label(egui::RichText::new(msg).color(t.text_faint));
             });
+            if let Some(listing) = &platform {
+                ui.add_space(HOME_SECTION_GAP);
+                home_platform(app, ui, listing);
+            }
             if !recent.is_empty() {
-                ui.add_space(22.0);
+                ui.add_space(HOME_SECTION_GAP);
                 home_recent(app, ui, &recent);
             }
             ui.add_space(26.0);
@@ -2432,61 +2438,149 @@ fn start_screen_drop_hint(app: &PhotocraftApp) -> std::borrow::Cow<'static, str>
     }
 }
 
-/// Recent files listed on the Home screen.
+/// 平台存储提供给首页的文件（见 [`PlatformListing`]）。首页显示期间每帧查询一次；没有这个服务时，
+/// 整个区块都不绘制。
+fn platform_files(app: &mut PhotocraftApp) -> Option<PlatformListing> {
+    let files = (app.services.platform_files.as_mut()?)();
+    (!files.files.is_empty() || files.browse.is_some()).then_some(files)
+}
+
+/// 平台区块占用的行数：每个文件一行，再加一行打开平台浏览界面。
+fn home_platform_rows(listing: &PlatformListing) -> usize {
+    listing.files.len() + usize::from(listing.browse.is_some())
+}
+
+/// 首页一个区块占的高度：上方留白、标题、标题下的 4 px，再加每行的高度。两个区块和卡片的尺寸计算共用
+/// 这一个函数，三者不会对不上。
+fn home_section_height(rows: usize) -> f32 {
+    if rows == 0 { 0.0 } else { HOME_SECTION_GAP + 34.0 + rows as f32 * HOME_RECENT_ROW }
+}
+
+/// 首页区块在标题上方留出的空白。
+const HOME_SECTION_GAP: f32 = 22.0;
+
+/// 首页列表的宽度（它放在哪里见 [`rows_right`]）。
+const HOME_WIDTH: f32 = 380.0;
+
+/// 首页列表的右边界。
+fn rows_right(ui: &egui::Ui) -> f32 {
+    ui.max_rect().left() + (ui.available_width() + HOME_WIDTH) / 2.0
+}
+
+/// 首页列表里一行 [`HOME_WIDTH`] 宽的条目，右端在 `right`：图标、名字，以及一条到 `detail_end` 为止的
+/// 可选说明（悬停时停在 × 左侧）。
+fn home_row(ui: &mut egui::Ui, right: f32, icon: &str, color: Color32, name: &str, detail: Option<&str>, detail_end: f32) -> egui::Response {
+    let t = crate::theme::Tokens::get(ui.ctx());
+    let top = ui.cursor().top();
+    let row_rect = Rect::from_min_size(egui::pos2(right - HOME_WIDTH, top), egui::vec2(HOME_WIDTH, HOME_RECENT_ROW));
+    let hovered = ui.rect_contains_pointer(row_rect);
+    let resp = ui.allocate_rect(row_rect, Sense::click());
+    let row = resp.rect;
+    if hovered {
+        ui.painter().rect_filled(row, t.radius_sm, t.hover);
+    }
+    let icon_rect = Rect::from_center_size(egui::pos2(row.left() + 16.0, row.center().y), egui::vec2(16.0, 16.0));
+    crate::icons::paint(ui, icon_rect, icon, 14.0, t.text_dim);
+    // 名字最多占半行，长名字也给说明文字留出位置。
+    let name_g = crate::tab_strip::elided(ui, name, egui::FontId::proportional(12.5), color, HOME_WIDTH / 2.0);
+    let x = row.left() + 32.0;
+    let room = (detail_end - (x + name_g.size().x + 14.0)).max(0.0);
+    ui.painter().galley(egui::pos2(x, row.center().y - name_g.size().y / 2.0), name_g, color);
+    if let Some(detail) = detail
+        && room > 20.0
+        && !detail.is_empty()
+    {
+        let g = crate::tab_strip::elided(ui, detail, egui::FontId::proportional(11.5), t.text_faint, room);
+        ui.painter().galley(egui::pos2(detail_end - g.size().x, row.center().y - g.size().y / 2.0), g, t.text_faint);
+    }
+    resp
+}
+
+/// 画一行首页条目；指针停在上面时再画它的 ×，点 × 是把它从列表里拿掉，而不是打开它。`key` 用来区分
+/// 两个区块里 × 的 id（同一个文件可能两边都有）。返回 `(这一行, 是否点了 ×)`。
+fn home_entry(ui: &mut egui::Ui, right: f32, key: &str, name: &str, detail: &str) -> (egui::Response, bool) {
+    let t = crate::theme::Tokens::get(ui.ctx());
+    // × 盖在行上面，所以指针停在 × 上时这一行也算悬停。
+    let hovered = ui.rect_contains_pointer(Rect::from_min_size(egui::pos2(right - HOME_WIDTH, ui.cursor().top()), egui::vec2(HOME_WIDTH, HOME_RECENT_ROW)));
+    let detail_end = if hovered { right - 32.0 } else { right - 10.0 };
+    let row = home_row(ui, right, "file", t.text, name, Some(detail), detail_end);
+    row.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+    let mut forgot = false;
+    if hovered {
+        let close = Rect::from_center_size(egui::pos2(right - 16.0, row.rect.center().y), egui::vec2(22.0, 22.0));
+        let x = ui.interact(close, row.id.with(key), Sense::click());
+        let label = crate::i18n::fmt(tl!("Remove {name} from Recent"), &[("name", name)]);
+        x.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
+        let color = crate::icons::button_chrome(ui, close, false, x.hovered());
+        crate::icons::paint(ui, close, "x", 12.0, color);
+        forgot = x.on_hover_text(tl!("Remove from Recent")).clicked();
+    }
+    (row, forgot)
+}
+
+/// 首页的平台存储区块：标题、每个文件一行（点击打开，悬停显示路径，× 清除这个浏览器已经打不开的
+/// 那份），以及打开平台浏览界面的一行。点击都交回 `Services::platform_open`，请求和列表归它管，
+/// 这里只负责显示。
+fn home_platform(app: &mut PhotocraftApp, ui: &mut egui::Ui, listing: &PlatformListing) {
+    let t = crate::theme::Tokens::get(ui.ctx());
+    ui.horizontal(|ui| {
+        ui.add_space(((ui.available_width() - HOME_WIDTH) / 2.0).max(0.0) + 8.0);
+        ui.label(egui::RichText::new(&listing.heading).font(crate::theme::semibold(12.5)).color(t.text_dim));
+    });
+    ui.add_space(4.0);
+    let mut request = None;
+    let right = rows_right(ui);
+    for file in &listing.files {
+        // 点 × 是把这份文件从列表里拿掉，而不是打开它。
+        let (row, forget) = home_entry(ui, right, "forget", &file.name, &file.detail);
+        let row = row.on_hover_text(&file.id).on_hover_cursor(egui::CursorIcon::PointingHand);
+        if forget {
+            request = Some(PlatformRequest::Forget(file.id.clone()));
+        } else if row.clicked() {
+            request = Some(PlatformRequest::Open(file.id.clone()));
+        }
+    }
+    if let Some(label) = &listing.browse {
+        let browse_row = home_row(ui, right, "folder-open", t.accent, label, None, right - 10.0);
+        browse_row.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+        if browse_row.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            request = Some(PlatformRequest::Browse);
+        }
+    }
+    if let Some(request) = request
+        && let Some(open) = app.services.platform_open.as_mut()
+    {
+        open(request);
+    }
+}
+
+/// 首页列出的最近文件个数。
 const HOME_RECENT: usize = 6;
-/// Height of one Home-screen recent-file row.
+/// 首页一个最近文件行的高度。
 const HOME_RECENT_ROW: f32 = 30.0;
 
-/// The Home screen's "Recent" list: file name, its folder on the right, click to open. The
-/// hovered row shows a × that takes it off the list, and right-click offers Remove from Recent
-/// and Clear Recent Files (#2691).
+/// 首页的"最近"列表：文件名，右侧是所在文件夹，点击打开。悬停的行会显示 × 把它从列表里拿掉，右键菜单
+/// 里有"从最近中移除"和"清除最近文件"（#2691）。
 fn home_recent(app: &mut PhotocraftApp, ui: &mut egui::Ui, recent: &[String]) {
     let t = crate::theme::Tokens::get(ui.ctx());
-    let width = 380.0;
     ui.horizontal(|ui| {
-        // Line the heading up with the file icons.
-        ui.add_space(((ui.available_width() - width) / 2.0).max(0.0) + 8.0);
+        // 让标题和文件图标对齐。
+        ui.add_space(((ui.available_width() - HOME_WIDTH) / 2.0).max(0.0) + 8.0);
         ui.label(egui::RichText::new(tl!("Recent")).font(crate::theme::semibold(12.5)).color(t.text_dim));
     });
     ui.add_space(4.0);
     let mut open = None;
     let mut remove = None;
     let mut clear = false;
+    let right = rows_right(ui);
     for path in recent {
         let name = crate::file_open::display_name(path);
         let folder = std::path::Path::new(path).parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
-        let (row, resp) = ui.allocate_exact_size(egui::vec2(width, HOME_RECENT_ROW), Sense::click());
-        // The × sits on top of the row, so the row counts as hovered while the pointer is on it.
-        let hovered = ui.rect_contains_pointer(row);
-        if hovered {
-            ui.painter().rect_filled(row, t.radius_sm, t.hover);
-        }
-        let close = Rect::from_center_size(egui::pos2(row.right() - 16.0, row.center().y), egui::vec2(22.0, 22.0));
-        let right = if hovered { close.left() - 4.0 } else { row.right() - 10.0 };
-        let icon = Rect::from_center_size(egui::pos2(row.left() + 16.0, row.center().y), egui::vec2(16.0, 16.0));
-        crate::icons::paint(ui, icon, "file", 14.0, t.text_dim);
-        let x = row.left() + 32.0;
-        let name_g = crate::tab_strip::elided(ui, &name, egui::FontId::proportional(12.5), t.text, 170.0);
-        let name_w = name_g.size().x;
-        ui.painter().galley(egui::pos2(x, row.center().y - name_g.size().y / 2.0), name_g, t.text);
-        let folder_max = (right - (x + name_w + 14.0)).max(0.0);
-        if folder_max > 20.0 && !folder.is_empty() {
-            let fg = crate::tab_strip::elided(ui, &folder, egui::FontId::proportional(11.5), t.text_faint, folder_max);
-            ui.painter().galley(egui::pos2(right - fg.size().x, row.center().y - fg.size().y / 2.0), fg, t.text_faint);
-        }
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &name));
+        let (resp, forgot) = home_entry(ui, right, "remove", &name, &folder);
         let resp = resp.on_hover_text(path).on_hover_cursor(egui::CursorIcon::PointingHand);
-        if hovered {
-            let x = ui.interact(close, resp.id.with("remove"), Sense::click());
-            let label = crate::i18n::fmt(tl!("Remove {name} from Recent"), &[("name", &name)]);
-            x.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
-            let color = crate::icons::button_chrome(ui, close, false, x.hovered());
-            crate::icons::paint(ui, close, "x", 12.0, color);
-            if x.on_hover_text(tl!("Remove from Recent")).clicked() {
-                remove = Some(path.clone());
-            }
-        }
-        if resp.clicked() && remove.is_none() {
+        if forgot {
+            remove = Some(path.clone());
+        } else if resp.clicked() {
             open = Some(path.clone());
         }
         resp.context_menu(|ui| {
@@ -6007,26 +6101,93 @@ mod tests {
         assert!(hint.ends_with(&format!("paste a copied image with {}.", crate::notices::paste_hint(&wayland))), "{hint}");
     }
 
-    /// The Home screen's × takes a file off Recent without opening it, and its right-click menu
-    /// removes one entry or clears the list; the preferences keep the change (#2691).
+    /// 平台存储的列表能出现在首页，点击某一行会经 `Services::platform_open` 交回去（web 端的 VOS 存储）。
+    /// 没有这个服务时区块不出现，也就是桌面端的行为。
     #[test]
-    fn home_recent_entries_can_be_removed() {
+    fn the_home_screen_lists_platform_files_and_routes_their_clicks() {
+        use crate::{PlatformFile, PlatformListing};
         use egui_kittest::kittest::Queryable;
-        let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
-        for name in ["c.tif", "b.psd", "a.png"] {
-            app.push_recent(&format!("/tmp/photocraft-2691/{name}"));
-        }
+        use std::sync::{Arc, Mutex};
+
+        let clicks: Arc<Mutex<Vec<PlatformRequest>>> = Arc::default();
+        let listing = PlatformListing {
+            heading: "VOS storage".into(),
+            browse: Some("Browse VOS storage…".into()),
+            files: vec![PlatformFile { id: "v_abc://pics/a.psd".into(), name: "a.psd".into(), detail: "v_abc://pics".into() }],
+        };
+        let recorded = clicks.clone();
+        let services = crate::Services {
+            platform_files: Some(Box::new(move || listing.clone())),
+            platform_open: Some(Box::new(move |r| recorded.lock().unwrap_or_else(|e| e.into_inner()).push(r))),
+            ..Default::default()
+        };
+        let mut h = home_harness(services);
+        assert!(h.state().0.session.documents().is_empty(), "the Home screen is the empty state");
+
+        assert_eq!(clicks.lock().unwrap_or_else(|e| e.into_inner()).len(), 0, "nothing clicked yet");
+        h.get_by_label("a.psd").click();
+        h.get_by_label("Browse VOS storage…").click();
+        h.run_steps(2);
+        let clicks = clicks.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(clicks, vec![PlatformRequest::Open("v_abc://pics/a.psd".into()), PlatformRequest::Browse]);
+    }
+
+    /// 平台存储那一行的 × 是把文件从列表里移除，而不是打开它。
+    #[test]
+    fn the_platform_sections_x_removes_a_document_instead_of_opening_it() {
+        use crate::{PlatformFile, PlatformListing};
+        use egui_kittest::kittest::Queryable;
+        use std::sync::{Arc, Mutex};
+
+        let clicks: Arc<Mutex<Vec<PlatformRequest>>> = Arc::default();
+        let listing = PlatformListing {
+            heading: "VOS storage".into(),
+            browse: Some("Browse VOS storage…".into()),
+            files: vec![PlatformFile { id: "v_abc://pics/a.psd".into(), name: "a.psd".into(), detail: "v_abc".into() }],
+        };
+        let recorded = clicks.clone();
+        let services = crate::Services {
+            platform_files: Some(Box::new(move || listing.clone())),
+            platform_open: Some(Box::new(move |r| recorded.lock().unwrap_or_else(|e| e.into_inner()).push(r))),
+            ..Default::default()
+        };
+        let mut h = home_harness(services);
+        assert!(h.query_by_label("Remove a.psd from Recent").is_none(), "the × shows on the hovered row only");
+        h.get_by_label("a.psd").hover();
+        h.run_steps(2);
+        h.get_by_label("Remove a.psd from Recent").click();
+        h.run_steps(2);
+        assert_eq!(clicks.lock().unwrap_or_else(|e| e.into_inner()).clone(), vec![PlatformRequest::Forget("v_abc://pics/a.psd".into())]);
+    }
+
+    /// 一个显示 `services` 所提供内容的首页，已经跑了三帧（第一帧布局，后两帧让悬停和点击稳定下来）；
+    /// 要读回来的 app 是 `h.state().0`。
+    fn home_harness(services: crate::Services) -> egui_kittest::Harness<'static, (PhotocraftApp, bool)> {
         let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(900.0, 760.0)).build_ui_state(
             |ui, (app, ready): &mut (PhotocraftApp, bool)| {
                 if *ready {
                     egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| document_area(app, ui));
                 }
             },
-            (app, false),
+            (PhotocraftApp::new(photocraft_engine::Session::new(), services), false),
         );
         PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::default());
         h.state_mut().1 = true;
         h.run_steps(3);
+        h
+    }
+
+    /// 首页的 × 把文件从最近列表里拿掉而不打开；右键菜单可以删除一条或清空列表；偏好在改动后保存
+    /// （#2691）。
+    #[test]
+    fn home_recent_entries_can_be_removed() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = home_harness(crate::Services::default());
+        let app = &mut h.state_mut().0;
+        for name in ["c.tif", "b.psd", "a.png"] {
+            app.push_recent(&format!("/tmp/photocraft-2691/{name}"));
+        }
+        h.run_steps(1);
         let listed = |h: &egui_kittest::Harness<'_, (PhotocraftApp, bool)>| {
             let app = &h.state().0;
             assert_eq!(app.session.prefs().file_handling.recent_files, app.ui.recent_files, "stored in the preferences");
