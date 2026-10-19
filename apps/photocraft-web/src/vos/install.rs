@@ -118,34 +118,41 @@ pub fn install(services: &mut Services) {
 fn stage(path: &str, bytes: &[u8]) {
     with(|s| {
         s.next_save += 1;
-        if let Some(slot) = s.saving.get_mut(path) {
-            slot.0 = s.next_save;
-        }
+        // 第一次保存到这条路径时要占一个位置：`due_uploads` 只上传 `saving` 里已有的路径。
+        // 在途的上传要留着，否则第二次保存会和它同时上传同一个文件。
+        s.saving.entry(path.to_string()).and_modify(|slot| slot.0 = s.next_save).or_insert((s.next_save, None));
         s.writes.insert(path.to_string(), bytes.to_vec());
     });
 }
 
 /// 现在可以开始的上传：没有在途请求的路径，以及上传刚结束的路径。每条路径只发射最新的
 /// 那次保存，且绝不同时发两次。
+#[cfg(target_arch = "wasm32")]
 fn start_due() -> Vec<(String, Vec<u8>, u64)> {
-    with(|s| {
-        let mut due = Vec::new();
-        for (path, (newest, running)) in &mut s.saving {
-            if running.is_some() {
-                continue;
-            }
-            let Some(bytes) = s.writes.remove(path) else { continue };
-            *running = Some(*newest);
-            due.push((path.clone(), bytes, *newest));
+    with(due_uploads)
+}
+
+/// [`start_due`] 的正文，接受任意状态（测试也要用它）。
+fn due_uploads(s: &mut State) -> Vec<(String, Vec<u8>, u64)> {
+    let mut due = Vec::new();
+    for (path, (newest, running)) in &mut s.saving {
+        if running.is_some() {
+            continue;
         }
-        due
-    })
+        let Some(bytes) = s.writes.remove(path) else { continue };
+        *running = Some(*newest);
+        due.push((path.clone(), bytes, *newest));
+    }
+    due
 }
 
 /// 为 `request` 打开选择器，把 `reply` 停放起来等用户作答。
+#[cfg(target_arch = "wasm32")]
 fn show_dialog(request: FileDialogRequest, reply: photocraft_ui_egui::FileDialogReply) {
     let picker = match request {
-        FileDialogRequest::Open { multiple, .. } => Picker::new(Mode::Open { multiple }, crate::web::OPEN_EXTS.iter().map(|e| (*e).to_string()).collect(), None),
+        FileDialogRequest::Open { multiple, .. } => {
+            Picker::new(Mode::Open { multiple }, crate::web::OPEN_EXTS.iter().map(|e| (*e).to_string()).collect(), None)
+        }
         FileDialogRequest::Save { suggested } => Picker::new(Mode::Save, Vec::new(), Some(&suggested)),
         // 文件夹对话框在这里对 Finder 没有意义；回取消，让命令自己报出来。
         FileDialogRequest::Folder { .. } => {
@@ -316,7 +323,11 @@ fn finish_save(path: &str, ticket: u64, result: Result<(), model::Failure>) {
     match result {
         // 只有到达 VOS 的保存才属于首页。
         Ok(()) => with(|s| s.recent.record(path)),
-        Err(e) if !waiting => with(|s| s.errors.push(e.to_string())),
+        Err(e) if !waiting => {
+            // 外壳已经宣布“已保存”，所以失败必须说出来：说清是哪个文件，且文件没丢。
+            let name = path::display_name(path);
+            with(|s| s.errors.push(format!("{name} was not saved to VOS: {e} (the document is still in PhotoCraft, unsaved)")));
+        }
         Err(e) => log::warn!("photocraft-web: save of {path} failed, a newer one is queued: {e}"),
     }
     store_recent();
@@ -334,9 +345,66 @@ fn store_recent() {
 }
 
 /// 把 `message` 当错误显示：状态栏和通知各一份。
+#[cfg(target_arch = "wasm32")]
 fn report(app: &mut PhotocraftApp, message: String) {
     log::warn!("photocraft-web: {message}");
     app.ui.status = message.clone();
     app.ui.status_error = true;
     photocraft_ui_egui::notices::error(app, message);
+}
+#[cfg(test)]
+mod tests {
+    use super::{STATE, State, due_uploads, stage};
+
+    /// 借出插件状态跑一段测试。`stage`/`due_uploads` 自己会借它，所以这里必须放手。
+    ///
+    /// 并行的测试共用这一个 `thread_local!`，所以每个测试只碰自己的路径。
+    fn state<R>(f: impl FnOnce() -> R) -> R {
+        STATE.with(|s| *s.borrow_mut() = State::default());
+        let out = f();
+        STATE.with(|s| *s.borrow_mut() = State::default());
+        out
+    }
+
+    #[test]
+    fn the_first_save_to_a_new_path_is_uploaded() {
+        state(|| {
+            stage("v_vol1://pics/art.psd", b"psd");
+            let due = STATE.with(|s| due_uploads(&mut s.borrow_mut()));
+            assert_eq!(due.len(), 1, "the staged bytes go to the uploader");
+            assert_eq!(due[0].0, "v_vol1://pics/art.psd");
+            assert_eq!(due[0].1, b"psd");
+        });
+    }
+
+    #[test]
+    fn nothing_waits_behind_an_upload_that_is_still_running() {
+        state(|| {
+            stage("v_vol1://pics/art.psd", b"one");
+            assert_eq!(STATE.with(|s| due_uploads(&mut s.borrow_mut()).len()), 1);
+            // 上传还在路上：第二次保存只排队，等它结束。
+            stage("v_vol1://pics/art.psd", b"two");
+            assert!(STATE.with(|s| due_uploads(&mut s.borrow_mut()).is_empty()), "never two uploads of one file at once");
+        });
+    }
+
+    #[test]
+    fn the_upload_after_a_finished_one_carries_the_newest_save() {
+        state(|| {
+            stage("v_vol1://pics/art.psd", b"one");
+            let ticket = STATE.with(|s| due_uploads(&mut s.borrow_mut())[0].2);
+            stage("v_vol1://pics/art.psd", b"two");
+            stage("v_vol1://pics/art.psd", b"three");
+            // 第一次上传结束：`finish_save` 把在途标记清掉。
+            STATE.with(|s| {
+                let mut s = s.borrow_mut();
+                let Some(slot) = s.saving.get_mut("v_vol1://pics/art.psd") else { return };
+                slot.1 = None;
+                assert!(slot.0 > ticket, "a newer save is queued");
+            });
+            let due = STATE.with(|s| due_uploads(&mut s.borrow_mut()));
+            assert_eq!(due.len(), 1);
+            assert_eq!(due[0].1, b"three", "only the newest copy is sent");
+        });
+    }
 }
