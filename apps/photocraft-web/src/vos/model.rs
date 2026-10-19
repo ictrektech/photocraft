@@ -182,24 +182,120 @@ pub fn encode(value: &str) -> String {
     out
 }
 
-/// 单事件 `text/event-stream` 响应里的 JSON，`index` 就是这种回复。
+/// 响应正文里的 JSON 信封，返回**第一个完整的 JSON 值**。
 ///
-/// `GET /v1000/finder_next/index` 是 SSE 接口：正文是 `data: {"code":0,...}\n\n`。
-/// 直接按 JSON 解码会卡在 `data: ` 前缀上，所以这里先把这一个事件拆出来。
-/// 纯 JSON 正文（其他接口以及 `subfolders`）原样返回。
+/// 认两种形状：
 ///
-/// 每个响应都走这里（`http::send` 也在这里拆包），这样在解码任何载荷之前就能认出被拒的
-/// token，而本身不是 SSE 的正文也照样按普通 JSON 解码。
+/// - **SSE**：`GET /v1000/finder_next/index` 与 `progress/*` 的正文以事件行开头
+///   （`data: {...}`，前面可能有 `event:` / `id:` 行）。
+/// - **网关切分的普通 JSON**：gzip 后解码出来可能是 `{...}\t\nDATA:{...}`（每段一份压缩
+///   流），后续段落是网关分片，不是业务数据。
+///
+/// 首尾空白和 BOM 在拆包前就去掉：`data:` 只认行首。
+///
+/// 每个响应都走这里（`http.rs` 也在这里拆包），这样在解码任何载荷之前就能认出被拒的 token。
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // the browser's replies only
 pub fn sse_payload(body: &str) -> String {
     // SSE 允许 CRLF 换行；先统一，之后按哪种都切得对。
     let normalised = body.replace("\r\n", "\n");
-    let trimmed = normalised.trim_start();
-    let Some(rest) = trimmed.strip_prefix("data:") else {
-        return body.to_string();
+    let normalised = normalised.trim_start_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}');
+    let normalised = normalised.trim_end();
+    // 正文以 `{` 开头：就是（可能被网关切分的）普通 JSON，取第一个完整的值。
+    if normalised.starts_with('{') {
+        return json_value(normalised).unwrap_or(normalised).to_string();
+    }
+    // 否则只有以事件行开头的正文才是 SSE；`data:` 出现在正文中间的是纯文本或 JSON 字符串。
+    let Some(data) = sse_data(normalised) else {
+        return normalised.to_string();
     };
-    // 停在结束第一个事件的空行处；这里不预期出现多事件响应。
-    rest.split("\n\n").next().unwrap_or(rest).trim().to_string()
+    // 取不到完整值也把 `data:` 前缀去掉再交出去：否则 serde 只会报在 column 1，而那是
+    // `data:` 的 `d`。
+    json_value(data).unwrap_or(data).to_string()
+}
+
+/// `body`（已去掉前导空白）里第一个 `data:` 字段的内容，前提是它是 SSE 事件帧。
+///
+/// 只看**行首**的字段：事件帧以字段行开头（`data:`、`event:`、`id:`、`retry:` 或注释行），
+/// 正文中间出现的 `data:` 属于纯文本或 JSON 字符串，不是事件。
+fn sse_data(body: &str) -> Option<&str> {
+    let mut lines = body.lines();
+    let mut seen_field = false;
+    for line in lines.by_ref() {
+        let field = line.trim_start_matches([' ', '\t']);
+        if let Some(payload) = field.strip_prefix("data:") {
+            return Some(payload.trim_start());
+        }
+        // 事件帧可以以别的字段或注释行开头；数据行之前出现空行说明这不是事件流。
+        if field.starts_with("event:") || field.starts_with("id:") || field.starts_with("retry:") || field.starts_with(':') && !field.is_empty() {
+            seen_field = true;
+            continue;
+        }
+        if field.is_empty() && seen_field {
+            continue;
+        }
+        return None;
+    }
+    None
+}
+
+/// `rest`（`data:` 之后的正文）里第一个完整的 JSON 对象。
+///
+/// 按括号配对而不是按行或按空行：字符串里的花括号和转义不算数。
+fn json_value(rest: &str) -> Option<&str> {
+    let data = rest.trim_start();
+    let mut depth = 0i64;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut end = None;
+    for (offset, ch) in data.char_indices() {
+        if in_string {
+            match ch {
+                '\\' if !escaped => escaped = true,
+                '"' if !escaped => in_string = false,
+                _ => escaped = false,
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '{' | '[' => depth += 1,
+            '}' | ']' => {
+                depth -= 1;
+                if depth <= 0 {
+                    end = Some(offset + ch.len_utf8());
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    data.get(..end?)
+}
+
+/// 一次响应的正文，拆掉 SSE/网关封装，并给读不懂的纯文本标上出处。
+///
+/// 顺序不能反：先给非 `{` 开头的内容加前缀，`data: {...}` 就会变成 `VOS: data: {...}`，
+/// [`sse_payload`] 再也认不出事件。
+///
+/// `what` 是正文不是 JSON 时的出处提示（如 `"VOS upload"`，平台对上传报的是纯文本）。
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))] // the browser's replies only
+pub fn reply_body(body: &str, what: &str) -> String {
+    let unwrapped = sse_payload(body);
+    let text = unwrapped.trim();
+    if text.is_empty() || text.starts_with('{') {
+        return unwrapped;
+    }
+    // 拆包后仍不是 JSON：事件帧不能加前缀（读不懂的原因在帧里，不在“平台回了纯文本”上）。
+    // 在**原始**正文上看，因为拆包结果已经把 `data:` 剥掉了。
+    if sse_data(raw_trimmed(body)).is_some() {
+        return unwrapped;
+    }
+    format!("{what}: {text}")
+}
+
+/// 去掉前导空白和 BOM，与 [`sse_payload`] 的入口一致。
+fn raw_trimmed(body: &str) -> &str {
+    body.trim_start_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}')
 }
 
 /// `userinfo` 回复里的 `sub`，或者平台拒绝它的原因。
@@ -256,7 +352,8 @@ fn json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, Failure> {
 /// 响应的开头，用于错误消息：足以看出到底收到了什么，又短到能塞进选择器的一行标签。
 /// 不会是整个文件，也不会是 token（响应不会回显请求头）。
 fn snippet(text: &str) -> String {
-    let escaped = text.trim_start().escape_debug().to_string();
+    let text = text.trim_start_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}');
+    let escaped = text.escape_debug().to_string();
     let cut = escaped.char_indices().nth(80).map_or(escaped.len(), |(at, _)| at);
     let cut = escaped.get(..cut).unwrap_or("");
     format!("{cut} ({} bytes)", text.len())
@@ -349,9 +446,91 @@ mod tests {
         assert_eq!(index.files[0].storage, "v_01M31");
     }
 
+    /// 被压缩成一行的两个 SSE 事件：中间只有一个 tab，没有空行。
+    #[test]
+    fn a_compressed_sse_reply_stops_at_the_end_of_the_payload() {
+        let body =
+            "data: {\"code\":0,\"category\":\"ok\",\"data\":{\"adapter\":\"v_01M31\",\"path\":\"v_01M31://a\\\"b\"},\"msg\":\"\"}\there:data: {\"code\":0}\n\n";
+        assert_eq!(sse_payload(body), "{\"code\":0,\"category\":\"ok\",\"data\":{\"adapter\":\"v_01M31\",\"path\":\"v_01M31://a\\\"b\"},\"msg\":\"\"}");
+    }
+
+    /// 普通 JSON 被网关 gzip 后解码出来的拼接正文（压缩段 + 明文段）。
+    #[test]
+    fn a_json_reply_split_by_a_gateway_keeps_its_first_value() {
+        let payload = "{\"code\":0,\"category\":\"ok\",\"data\":\"\",\"msg\":\"\",\"version\":\"0.153.0\"}";
+        let body = format!("{payload}\t\nDATA:{payload}");
+        assert_eq!(sse_payload(&body), payload);
+        let envelope: Envelope = serde_json::from_str(&sse_payload(&body)).expect("the reply decodes");
+        assert_eq!(envelope.failure().map(|failure| failure.code), None);
+    }
+
+    /// 六种真实响应形状都走完 `reply_body` 后能解码。
+    #[test]
+    fn live_reply_shapes_decode_end_to_end() {
+        // `GET /v1000/finder_next/index` 的信封，以及网关可能加上的前缀。
+        let index = r#"{"code":0,"category":"ok","data":{"adapter":"v_01M31B5XDFHPXSKCBSXAZVZA83","storages":[],"dirname":"v_01M31B5XDFHPXSKCBSXAZVZA83://","files":[{"type":"dir","path":"v_01M31B5XDFHPXSKCBSXAZVZA83://probe_folder","basename":"probe_folder","extension":"","storage":"v_01M31B5XDFHPXSKCBSXAZVZA83","file_size":4096}],"sort_by":"name","sort_order":"asc"},"msg":"","version":"1.1.0-20261011.1.f0232367"}"#;
+        for body in [
+            format!("data: {index}\n\n"),
+            format!(" data: {index}\n\n"),
+            format!("\tdata: {index}\n\n"),
+            format!("\u{feff}data: {index}\n\n"),
+            format!("data: {index}"),
+            index.to_string(),
+        ] {
+            let decoded = decode::<Index>(&reply_body(&body, "VOS"));
+            assert!(decoded.is_ok(), "{body:.90} must decode: {:?}", decoded.err().map(|e| e.message));
+            assert_eq!(decoded.expect("decoded").files.len(), 1);
+        }
+    }
+
+    /// 事件帧只在正文以字段行**开头**时成立；正文中间的 `data:` 不算。
+    #[test]
+    fn a_data_field_inside_a_body_is_not_an_event_frame() {
+        assert!(sse_data(raw_trimmed("data: {\"code\":0}")).is_some());
+        assert!(sse_data(raw_trimmed("  \tevent: message\ndata: {}")).is_some());
+        assert!(sse_data(raw_trimmed("\u{feff}data:{}")).is_some());
+        assert!(sse_data(raw_trimmed("upstream said no\ndata: reset")).is_none());
+        // 一段纯文本错误，中间恰好有 `\ndata:`：原样返回，并带上出处。
+        let body = "upstream said no\ndata: connection reset";
+        assert_eq!(reply_body(body, "VOS upload"), format!("VOS upload: {body}"));
+    }
+
+    /// 纯文本错误带上出处；空正文、信封和 SSE 帧都不加。
+    #[test]
+    fn a_plain_text_reply_is_still_attributed() {
+        let body = "Invalid 'boundary' for 'multipart/form-data' request";
+        assert_eq!(reply_body(body, "VOS upload"), format!("VOS upload: {body}"));
+        assert_eq!(reply_body("", "VOS"), "");
+        assert_eq!(reply_body("{\"code\":0}", "VOS"), "{\"code\":0}");
+        // SSE 帧：`data:` 剥掉、不加前缀，报错才落得进 JSON 内部。
+        assert_eq!(reply_body("data: {truncated", "VOS"), "{truncated");
+        assert_eq!(reply_body("data: broken", "VOS"), "broken");
+    }
+
     #[test]
     fn a_crlf_sse_reply_is_unwrapped_too() {
         assert_eq!(sse_payload("data:{\"code\":0}\r\n\r\n"), "{\"code\":0}");
+    }
+
+    /// 截断的 SSE 帧：`data:` 前缀去掉，错误位置落在 JSON 内部而不是 `data:` 的 `d`。
+    #[test]
+    fn an_unwrapable_sse_frame_is_not_dressed_up_as_plain_text() {
+        let body = "data: {\"code\":0,\"data\":{\"files\":[";
+        let unwrapped = sse_payload(body);
+        assert!(unwrapped.starts_with('{'), "the `data:` prefix must go: {unwrapped:?}");
+        let failure = decode::<Index>(&unwrapped).expect_err("a truncated frame must not decode");
+        assert!(!failure.message.contains("line 1 column 1"), "{}", failure.message);
+    }
+
+    /// 合法的信封即使 `data:` 前有空格或 BOM 也能解码。
+    #[test]
+    fn the_reported_unreadable_reply_can_no_longer_be_produced() {
+        let payload = "{\"code\":0,\"category\":\"ok\",\"data\":{\"adapter\":\"v_01M31B5XDFHPXSKCBSXAZVZA83\",\"files\":[]},\"msg\":\"\"}";
+        for body in [format!("data: {payload}\n\n"), format!("  data: {payload}\n\n"), format!("\u{feff}data: {payload}\n\n")] {
+            let unwrapped = sse_payload(&body);
+            let decoded = decode::<Index>(&unwrapped);
+            assert!(decoded.is_ok(), "{body:?} must decode, got {:?}", decoded.err().map(|e| e.message));
+        }
     }
 
     #[test]
@@ -495,6 +674,14 @@ mod tests {
     fn an_unreadable_reply_is_quoted_shortly() {
         let failure = decode::<Index>(&"x".repeat(400)).expect_err("a failure");
         assert!(failure.message.contains("400 bytes") && failure.message.len() < 200, "{}", failure.message);
+    }
+
+    /// 错误消息里引用的正文不带 BOM 和前后空白。
+    #[test]
+    fn an_error_quote_drops_a_leading_byte_order_mark() {
+        let failure = decode::<Index>("\u{feff}<html>login</html>").expect_err("a failure");
+        assert!(!failure.message.contains('\u{feff}'), "{}", failure.message);
+        assert!(failure.message.contains("<html>"), "{}", failure.message);
     }
 
     #[test]

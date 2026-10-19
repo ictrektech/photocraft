@@ -12,7 +12,7 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 
 use super::bridge;
-use super::model::{self, error_message, Failure, Index, Volume, VolumePage};
+use super::model::{self, Failure, Index, Volume, VolumePage, error_message};
 use super::path::FinderPath;
 
 /// 平台 Finder 的基础路径（同源：页面就由平台主机提供）。
@@ -90,13 +90,14 @@ async fn send(init: &web_sys::RequestInit, url: &str) -> Result<web_sys::Respons
 }
 
 /// 响应的 JSON，交给解码器（先拆掉 SSE 接口的封装）。
-async fn reply(init: &web_sys::RequestInit, url: &str) -> Result<String, Failure> {
+///
+/// `what` 是正文不是 JSON 时的出处提示（如 `"VOS upload"`）。
+/// 拆包与出处标注都在 [`model::reply_body`] 里，所以能在宿主机测试。
+async fn reply(init: &web_sys::RequestInit, url: &str, what: &str) -> Result<String, Failure> {
     let response = send(init, url).await?;
     let text = finish(response.text()).await.map_err(|e| broke(JsValue::from_str(&e)))?;
-    let body = text
-        .as_string()
-        .ok_or_else(|| Failure { code: model::BAD_PATH, message: format!("VOS returned no body (HTTP {})", response.status()) })?;
-    Ok(model::sse_payload(&body))
+    let body = text.as_string().ok_or_else(|| Failure { code: model::BAD_PATH, message: format!("{what} returned no body (HTTP {})", response.status()) })?;
+    Ok(model::reply_body(&body, what))
 }
 
 /// 带上 `token` 的请求初始化参数。
@@ -116,12 +117,12 @@ fn authorized(method: &str, token: &str) -> Result<web_sys::RequestInit, Failure
 /// 一次 GET；平台报告令牌被拒时换新令牌重试一次。
 async fn get(url: &str) -> Result<String, Failure> {
     let token = token().await?;
-    let text = reply(&authorized("GET", &token)?, url).await?;
+    let text = reply(&authorized("GET", &token)?, url, "VOS").await?;
     if !refused(&text) {
         return Ok(text);
     }
     let token = renew().await?;
-    reply(&authorized("GET", &token)?, url).await
+    reply(&authorized("GET", &token)?, url, "VOS").await
 }
 
 async fn post(url: &str, body: &str) -> Result<String, Failure> {
@@ -139,7 +140,7 @@ async fn post(url: &str, body: &str) -> Result<String, Failure> {
 async fn send_body(url: &str, body: &JsValue, token: &str) -> Result<String, Failure> {
     let init = authorized("POST", token)?;
     init.set_body(body);
-    reply(&init, url).await
+    reply(&init, url, "VOS").await
 }
 
 /// 列出一个目录。平台分开接收 adapter 和路径：路径是完整的 Finder 路径，平台自己的
@@ -267,19 +268,41 @@ async fn finish(promise: Result<js_sys::Promise<JsValue>, JsValue>) -> Result<Js
 /// `conflict_strategy=overwrite` 必填：平台默认是 `reject`，那样一次普通的 Ctrl+S 就会变成
 /// "文件已存在"错误。
 pub async fn upload(dir: &FinderPath, name: &str, bytes: &[u8]) -> Result<(), Failure> {
-    let form = web_sys::FormData::new().map_err(broke)?;
-    form.append_with_str("adapter", &dir.adapter).map_err(broke)?;
-    form.append_with_str("path", &dir.api_path()).map_err(broke)?;
-    form.append_with_str("name", name).map_err(broke)?;
-    form.append_with_str("conflict_strategy", "overwrite").map_err(broke)?;
     let array = js_sys::Uint8Array::from(bytes);
     let blob = web_sys::Blob::new_with_u8_array_sequence(&js_sys::Array::of1(&array)).map_err(broke)?;
-    form.append_with_blob_and_filename("file", &blob, name).map_err(broke)?;
     let url = format!("{FINDER}/upload");
-    let form: JsValue = form.into();
-    let mut text = send_body(&url, &form, &bridge::token().await.map_err(|e| broke(JsValue::from_str(&e)))?).await?;
+    let upload = |token: String| {
+        let dir = dir.clone();
+        let blob = blob.clone();
+        let url = url.clone();
+        let name = name.to_string();
+        async move {
+            // 表单每次新建：`RequestInit` 的正文只能用一次，而重试要重发同一份数据。
+            let form = web_sys::FormData::new().map_err(broke)?;
+            form.append_with_str("adapter", &dir.adapter).map_err(broke)?;
+            form.append_with_str("path", &dir.api_path()).map_err(broke)?;
+            form.append_with_str("name", &name).map_err(broke)?;
+            form.append_with_str("conflict_strategy", "overwrite").map_err(broke)?;
+            form.append_with_blob_and_filename("file", &blob, &name).map_err(broke)?;
+            send_form(&url, &JsValue::from(form), "VOS upload", &token).await
+        }
+    };
+    // 平台对上传（和别的 POST 一样）报的错可能是纯文本，见 [`model::reply_body`]。
+    let mut text = upload(token().await?).await?;
     if refused(&text) {
-        text = send_body(&url, &form, &bridge::renew().await.map_err(|e| broke(JsValue::from_str(&e)))?).await?;
+        text = upload(renew().await?).await?;
     }
     body::<String>(&text).map(|_| ())
+}
+
+/// 和 [`send_body`] 一样，但按**表单**发（没有 JSON 的 `Content-Type`：浏览器要自己写带
+/// boundary 的那个），并让正文用 `what` 解释读不懂的响应。
+async fn send_form(url: &str, form: &JsValue, what: &str, token: &str) -> Result<String, Failure> {
+    let init = web_sys::RequestInit::new();
+    init.set_method("POST");
+    let headers = web_sys::Headers::new().map_err(broke)?;
+    headers.set("Authorization", &format!("Bearer {token}")).map_err(broke)?;
+    init.set_headers(&headers);
+    init.set_body(form);
+    reply(&init, url, what).await
 }
