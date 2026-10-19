@@ -273,9 +273,10 @@ pub fn ui(app: &mut PhotocraftApp, ctx: &egui::Context) {
     if busy {
         ctx.request_repaint();
     }
-    let theme = app.ui.theme;
-    let action = picker::show(ctx, &mut picker, theme, busy);
-    own_keyboard(ctx, &mut picker, busy);
+    picker.set_theme(app.ui.theme);
+    // 键盘要先定下来：`TextEdit` 只在有焦点的那一帧决定初始光标位置。
+    own_keyboard(ctx);
+    let action = picker::show(ctx, &mut picker, busy);
     let keep = !matches!(action, Action::Cancel);
     with(|s| s.picker = keep.then_some(picker));
     match action {
@@ -288,67 +289,22 @@ pub fn ui(app: &mut PhotocraftApp, ctx: &egui::Context) {
 
 /// 键盘焦点归谁：指针在选择器里时归选择器，出去时归 app。
 ///
-/// - **指针移进选择器**：把焦点从窗口交给选择器自己的控件（输入框、按钮）。
-/// - **指针停在里面**（悬停、按着、正在点保存输入框）：不动焦点。
-/// - **指针离开**：焦点还给 app，快捷键照常直到指针再进来。
-pub(crate) fn own_keyboard(ctx: &egui::Context, picker: &mut Picker, busy: bool) {
-    let session = ctx.data(|d| d.get_temp::<Keyboard>(keyboard_id()));
+/// 指针离开时交还窗口的焦点；指针在里面而焦点空着时把键盘交给窗口。已有焦点时不动：
+/// 反复 `request_focus` 会清掉 egui 记的光标位置。
+pub(crate) fn own_keyboard(ctx: &egui::Context) {
     let over = ctx.pointer_hover_pos().filter(|pos| ctx.layer_id_at(*pos).is_some_and(|layer| layer.order == egui::Order::Middle));
-    let held = over.is_some_and(|pos| picker.name_field_under_pointer(pos)) || ctx.input(|i| i.pointer.any_down());
     let picker_id = picker::id();
-    let mut state = session.unwrap_or_default();
-    match (state, over) {
-        // 指针刚进来：键盘归选择器。
-        (Keyboard::App, Some(_)) => {
-            ctx.memory_mut(|m| m.surrender_focus(picker_id));
-            state = Keyboard::Picker;
-        }
-        // 指针已经在里面：只在没人拿着焦点时补一个给窗口，免得按键漏给 app。
-        (Keyboard::Picker, Some(_)) => {
-            if !held && ctx.memory(|m| m.focused()).is_none() {
-                ctx.memory_mut(|m| m.request_focus(picker_id));
-            }
-        }
-        // 指针出去了：键盘还给 app。
-        (Keyboard::Picker, None) => {
-            ctx.memory_mut(|m| m.surrender_focus(picker_id));
-            state = Keyboard::App;
-        }
-        (Keyboard::App, None) => {}
+    let inside = over.is_some();
+    if ctx.data(|d| d.get_temp::<bool>(keyboard_id())) == Some(true) && !inside {
+        ctx.memory_mut(|m| m.surrender_focus(picker_id));
     }
-    ctx.data_mut(|d| d.insert_temp(keyboard_id(), state));
-    picker.note_keyboard(matches!(state, Keyboard::Picker));
-    // 指针一直在选择器里时，焦点可能空着（对话框刚打开、或用户刚离开又回来），按键就会漏给
-    // app：把键盘交给名字输入框（保存模式）或窗口本身；指针压着输入框的帧除外。
-    //
-    // 拿不到键盘时才请求重绘：输入框刚好这一帧才拿到键盘时，egui 下一帧才生效。
-    if matches!(state, Keyboard::Picker) && !held && !ctx.input(|i| i.pointer.any_click()) && ctx.memory(|m| m.focused()).is_none() {
-        let target = match picker.mode() {
-            super::state::Mode::Save => picker::name_field_id(),
-            _ => picker_id,
-        };
-        ctx.memory_mut(|m| m.request_focus(target));
-        if !ctx.memory(|m| m.has_focus(target)) {
-            ctx.request_repaint();
-        }
-    }
-    // 输入框灰掉（数据在途）时它不响应指针，焦点可能被 egui 丢掉：下一帧再要回来。
-    if busy && ctx.memory(|m| m.has_focus(picker::name_field_id())) {
-        ctx.request_repaint();
+    ctx.data_mut(|d| d.insert_temp(keyboard_id(), inside));
+    if inside && ctx.memory(|m| m.focused()).is_none() {
+        ctx.memory_mut(|m| m.request_focus(picker_id));
     }
 }
 
-/// 键盘现在归谁（见 [`own_keyboard`]）。
-#[cfg(any(target_arch = "wasm32", test))]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Keyboard {
-    /// app 拿着，快捷键照常。
-    #[default]
-    App,
-    /// 选择器拿着：指针在里面，按键都归它。
-    Picker,
-}
-
+/// [`own_keyboard`] 存的“键盘是否归选择器”标记。
 #[cfg(any(target_arch = "wasm32", test))]
 fn keyboard_id() -> egui::Id {
     egui::Id::new("vos-finder-keyboard")

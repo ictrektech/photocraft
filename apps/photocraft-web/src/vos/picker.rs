@@ -5,7 +5,7 @@
 
 use egui::{Context, RichText, Ui};
 use photocraft_ui_egui::i18n;
-use photocraft_ui_egui::theme::{ThemeKind, Tokens};
+use photocraft_ui_egui::theme::Tokens;
 
 use super::model::Entry;
 use super::state::{Choice, Mode, Phase, Picker};
@@ -22,21 +22,16 @@ pub enum Action {
 }
 
 /// 把选择器画成一个类模态窗口。`busy` 在有在途请求时禁用控件。
-pub fn show(ctx: &Context, picker: &mut Picker, theme: ThemeKind, busy: bool) -> Action {
-    let tokens = Tokens::for_kind(theme);
+pub fn show(ctx: &Context, picker: &mut Picker, busy: bool) -> Action {
     let mut action = Action::None;
-    let (title, primary) = match picker.mode() {
-        Mode::Open { .. } => (i18n::t("Open from VOS"), i18n::t("Open")),
-        Mode::Save => (i18n::t("Save to VOS"), i18n::t("Save")),
-    };
-    egui::Window::new(title)
+    egui::Window::new(title(picker.mode()))
         .id(id())
         .collapsible(false)
         .resizable(true)
         .default_size(egui::vec2(640.0, 460.0))
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
-            action = body(ui, picker, &tokens, busy, primary);
+            action = body(ui, picker, busy);
         });
     action
 }
@@ -51,64 +46,25 @@ pub fn name_field_id() -> egui::Id {
     egui::Id::new("vos-finder-name")
 }
 
-/// 画输入框时占位用的字符。
-const MASK: char = '•';
-
-/// 本帧的按键，见 [`name_keys`]。
-#[derive(Debug, Default)]
-struct Keys {
-    /// 删掉光标前的一个字。
-    deleted: bool,
-    /// 回车：就是主按钮（Esc 由 `body` 的全局分支处理）。
-    enter: bool,
-    /// 要接着打进名字的字符。
-    typed: Vec<char>,
-}
-/// 本帧按下的键。
-///
-/// 读 `Event::Key` 的按键，也从 `Event::Text` 读单个字符：文本事件带的是要输入的字符
-/// （中文输入法提交的也是它），而有的输入前端只给文本、不给按键（`Event::Text("\x7f")`
-/// 就是退格）。
-fn name_keys(events: &[egui::Event]) -> Keys {
-    use egui::Key;
-
-    let mut keys = Keys::default();
-    for event in events {
-        match event {
-            egui::Event::Key { key, pressed: true, modifiers, .. } if !modifiers.command && !modifiers.ctrl && !modifiers.alt => match key {
-                Key::Backspace => keys.deleted = true,
-                Key::Enter => keys.enter = true,
-                _ => {}
-            },
-            egui::Event::Text(text) => {
-                for ch in text.chars() {
-                    match ch {
-                        '\u{7f}' | '\u{8}' => keys.deleted = true,
-                        '\n' | '\r' => keys.enter = true,
-                        // 分隔符会换一个目录，控制字符会截断路径：名字里都不能有。
-                        ch if !ch.is_control() && ch != '/' && ch != '\\' => keys.typed.push(ch),
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
-        }
+/// 窗口标题。
+fn title(mode: &Mode) -> &'static str {
+    match mode {
+        Mode::Open { .. } => i18n::t("Open from VOS"),
+        Mode::Save => i18n::t("Save to VOS"),
     }
-    keys
 }
 
-/// 按这一帧的按键算出名字的新样子：退格删掉最后一个字，打的字接在后面，光标始终在末尾。
-///
-/// 名字不交给 egui 编辑：它每帧把光标折回开头。输入框只负责接收键盘，画的是这里算出来的名字。
-fn name_caret(name: &str, keys: &Keys) -> String {
-    let mut text: Vec<char> = name.chars().collect();
-    if keys.deleted {
-        text.pop();
+/// 下角的主按钮：打开对话框是"Open"，保存对话框是"Save"。
+fn primary(mode: &Mode) -> &'static str {
+    match mode {
+        Mode::Open { .. } => i18n::t("Open"),
+        Mode::Save => i18n::t("Save"),
     }
-    text.extend(keys.typed.iter().copied());
-    text.into_iter().collect()
 }
-fn body(ui: &mut Ui, picker: &mut Picker, tokens: &Tokens, busy: bool, primary: &str) -> Action {
+
+fn body(ui: &mut Ui, picker: &mut Picker, busy: bool) -> Action {
+    let tokens = Tokens::for_kind(picker.theme());
+    let primary = primary(picker.mode());
     let mut action = Action::None;
     // 当前位置：卷选择界面，或正在浏览的路径。
     ui.horizontal(|ui| {
@@ -160,24 +116,28 @@ fn body(ui: &mut Ui, picker: &mut Picker, tokens: &Tokens, busy: bool, primary: 
         }
         Phase::Browsing => {
             egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                let mut clicked = None;
                 let entries: Vec<Entry> = picker.visible_entries().cloned().collect();
                 if entries.is_empty() {
                     ui.label(RichText::new(i18n::t("This folder is empty")).color(tokens.text_dim));
                 }
+                // 删除这类决定由 `picker` 记下，所以本帧只收集点击，循环结束后再执行。
                 for entry in entries {
+                    let (icon, size) = if entry.is_dir() { ("📁", None) } else { ("🖼", Some(human_size(entry.file_size))) };
                     ui.horizontal(|ui| {
-                        if entry.is_dir() {
-                            if ui.add_enabled(!busy, egui::Button::new(format!("📁 {}", entry.basename))).clicked() {
-                                picker.activate(&entry);
-                            }
-                        } else {
-                            let selected = picker.is_selected(&entry.path);
-                            if ui.add_enabled(!busy, egui::Button::new(format!("🖼 {}", entry.basename)).selected(selected)).clicked() {
-                                picker.activate(&entry);
-                            }
-                            ui.label(RichText::new(human_size(entry.file_size)).color(tokens.text_dim).small());
+                        let name = format!("{icon} {}", entry.label());
+                        let button = egui::Button::new(name).selected(!entry.is_dir() && picker.is_selected(&entry.path)).min_size(egui::vec2(240.0, 0.0));
+                        let response = ui.add_enabled(!busy, button);
+                        if response.clicked() {
+                            clicked = Some(entry.clone());
+                        }
+                        if let Some(size) = size {
+                            ui.label(RichText::new(size).color(tokens.text_dim).small());
                         }
                     });
+                }
+                if let Some(file) = clicked {
+                    picker.activate(&file);
                 }
             });
         }
@@ -187,33 +147,20 @@ fn body(ui: &mut Ui, picker: &mut Picker, tokens: &Tokens, busy: bool, primary: 
     if matches!(picker.mode(), Mode::Save) {
         ui.horizontal(|ui| {
             ui.label(i18n::t("File name"));
-            // 输入框只负责拿键盘，文字不让 egui 改：名字画成 `•` 占位，这一帧的键由
-            // [`name_caret`] 算（打的字接在末尾，退格删末尾那一个）。
-            //
-            // 名字为空时画提示文字而不是 `•`。数据在途（`busy`）时只灰掉，不能停用：指针离开
-            // 它就会丢掉键盘。
-            //
-            // 按键只在输入框真的拿着键盘时才算：焦点交还 app 后，用户在文本工具里打的字不能
-            // 也进到文件名里。
-            let name = picker.file_name_text();
-            let mut mask = if name.is_empty() { String::new() } else { std::iter::repeat_n(MASK, name.chars().count()).collect() };
-            let mut display = egui::TextEdit::singleline(&mut mask).id(name_field_id());
-            if name.is_empty() {
-                display = display.hint_text(super::state::FILE_NAME_HINT);
-            }
-            let response = ui.add_enabled_ui(true, |ui| display.show(ui)).inner.response;
-            // 焦点在 `show` 之后读：点击就是在这一步把焦点交给输入框的。
-            let keys = if picker.owns_keyboard() { name_keys(&ui.input(|i| i.events.clone())) } else { Keys::default() };
-            let written = name_caret(name, &keys);
-            if written != name {
-                picker.edit_file_name(&written);
-            }
-            // 回车就是主按钮，所以在途请求时不能确认（主按钮此时是灰的）。
-            if keys.enter && !busy {
+            // 直接编辑 `picker` 持有的名字；在途请求时只让看不让改。
+            let enter = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+            let response = ui.add_enabled(
+                !busy,
+                egui::TextEdit::singleline(picker.file_name_mut())
+                    .id(name_field_id())
+                    .hint_text(super::state::FILE_NAME_HINT)
+                    .desired_width(260.0)
+                    .min_size(egui::vec2(260.0, 20.0)),
+            );
+            // 回车就是主按钮；在途请求时主按钮是灰的，回车也不确认。
+            if enter && !busy && response.has_focus() {
                 action = picker.confirm().map_or(Action::None, Action::Confirm);
             }
-
-            picker.note_name_field_position(Some(response.rect));
         });
     }
     if !busy && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -248,6 +195,19 @@ mod tests {
     use super::human_size;
     use crate::vos::state::Mode;
 
+    /// 装 egui 的字体，并把主题点名的 `medium`/`semibold` 家族绑到比例字体上。
+    ///
+    /// 无头渲染没有随包字体：不装时文字宽度算成 0，`cursor_from_pos` 永远返回 0。
+    fn install_test_fonts(ctx: &egui::Context) {
+        let mut fonts = photocraft_ui_egui::egui_fonts::definitions();
+        let proportional = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
+        for family in ["medium", "semibold"] {
+            fonts.families.insert(egui::FontFamily::Name(family.into()), proportional.clone());
+        }
+        ctx.set_fonts(fonts);
+        photocraft_ui_egui::theme::apply(ctx, photocraft_ui_egui::theme::ThemeKind::ProMedium);
+    }
+
     #[test]
     fn sizes_read_as_short_units() {
         assert_eq!(human_size(0), "0.0 B");
@@ -268,14 +228,16 @@ mod tests {
         let picker = std::cell::RefCell::new(super::Picker::new(Mode::Save, Vec::new(), Some("Untitled-1.psd")));
         picker.borrow_mut().set_volumes(vec![crate::vos::model::Volume { uuid: "v1".into(), nick_name: None, name: "Space".into() }]);
         let actions = std::cell::RefCell::new(Vec::new());
+        picker.borrow_mut().set_theme(photocraft_ui_egui::theme::ThemeKind::ProMedium);
         let mut h = Harness::builder().with_size(egui::vec2(640.0, 460.0)).build_ui(|ui| {
             let mut picker = picker.borrow_mut();
-            let action = super::show(ui.ctx(), &mut picker, super::ThemeKind::ProMedium, false);
-            super::super::install::own_keyboard(ui.ctx(), &mut picker, false);
+            let action = super::show(ui.ctx(), &mut picker, false);
+            super::super::install::own_keyboard(ui.ctx());
             if action != super::Action::None {
                 actions.borrow_mut().push(action);
             }
         });
+        install_test_fonts(&h.ctx);
         h.step();
         h.step();
         // 指针挪进对话框：这一帧起按键归对话框。
@@ -284,7 +246,16 @@ mod tests {
         h.step();
         h.step();
         h.step();
-        // 打字接在原来的名字后面，不是插到名字前面。
+        // 点进输入框，把光标放到名字末尾。
+        let rect = h.ctx.read_response(super::name_field_id()).expect("the field was drawn").rect;
+        let click = rect.right_center() - egui::vec2(3.0, 0.0);
+        h.event(egui::Event::PointerMoved(click));
+        h.step();
+        h.event(egui::Event::PointerButton { pos: click, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.step();
+        h.event(egui::Event::PointerButton { pos: click, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.step();
+        h.step();
         h.event(egui::Event::Text("co".into()));
         h.step();
         h.step();
@@ -310,19 +281,14 @@ mod tests {
         actions.borrow_mut().clear();
         let text = || picker.borrow().file_name_text().to_string();
         // 点进输入框再打字：用户不会先把光标摆到哪，就在框里打。
-        h.event(egui::Event::PointerButton {
-            pos: egui::pos2(320.0, 220.0),
-            button: egui::PointerButton::Primary,
-            pressed: true,
-            modifiers: egui::Modifiers::NONE,
-        });
+        // 再点一次输入框，把光标放回末尾。
+        let rect = h.ctx.read_response(super::name_field_id()).expect("the field was drawn").rect;
+        let again = rect.right_center() - egui::vec2(3.0, 0.0);
+        h.event(egui::Event::PointerMoved(again));
         h.step();
-        h.event(egui::Event::PointerButton {
-            pos: egui::pos2(320.0, 220.0),
-            button: egui::PointerButton::Primary,
-            pressed: false,
-            modifiers: egui::Modifiers::NONE,
-        });
+        h.event(egui::Event::PointerButton { pos: again, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.step();
+        h.event(egui::Event::PointerButton { pos: again, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
         h.step();
         h.step();
         let mut backspaces = 0;
@@ -360,10 +326,9 @@ mod tests {
 
         let picker = std::cell::RefCell::new(super::Picker::new(Mode::Save, Vec::new(), Some("art.psd")));
         picker.borrow_mut().set_volumes(vec![crate::vos::model::Volume { uuid: "v1".into(), nick_name: None, name: "Space".into() }]);
-        picker.borrow_mut().note_keyboard(false);
         let mut h = Harness::builder().with_size(egui::vec2(640.0, 460.0)).build_ui(|ui| {
             let mut picker = picker.borrow_mut();
-            let _ = super::show(ui.ctx(), &mut picker, super::ThemeKind::ProMedium, false);
+            let _ = super::show(ui.ctx(), &mut picker, false);
         });
         h.step();
         h.event(egui::Event::Text("xyz".into()));
@@ -379,12 +344,11 @@ mod tests {
 
         let picker = std::cell::RefCell::new(super::Picker::new(Mode::Save, Vec::new(), Some("art.psd")));
         picker.borrow_mut().set_volumes(vec![crate::vos::model::Volume { uuid: "v1".into(), nick_name: None, name: "Space".into() }]);
-        picker.borrow_mut().note_keyboard(true);
         let actions = std::cell::RefCell::new(Vec::new());
         // `busy = true`
         let mut h = Harness::builder().with_size(egui::vec2(640.0, 460.0)).build_ui(|ui| {
             let mut picker = picker.borrow_mut();
-            let action = super::show(ui.ctx(), &mut picker, super::ThemeKind::ProMedium, true);
+            let action = super::show(ui.ctx(), &mut picker, true);
             if action != super::Action::None {
                 actions.borrow_mut().push(action);
             }
@@ -437,17 +401,9 @@ mod tests {
             }
             let mut h = Harness::builder().with_size(egui::vec2(700.0, 420.0)).build_ui(|ui| {
                 let mut picker = picker.borrow_mut();
-                let _ = super::show(ui.ctx(), &mut picker, super::ThemeKind::ProMedium, false);
+                let _ = super::show(ui.ctx(), &mut picker, false);
             });
-            // 真 app 启动时装随包字体并套主题；无头渲染里没有随包字体，所以用 egui 的，但先把
-            // 主题点名的 `medium`/`semibold` 家族绑上（否则 epaint 找不到家族）。
-            let mut fonts = photocraft_ui_egui::egui_fonts::definitions();
-            let proportional = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
-            for family in ["medium", "semibold"] {
-                fonts.families.insert(egui::FontFamily::Name(family.into()), proportional.clone());
-            }
-            h.ctx.set_fonts(fonts);
-            photocraft_ui_egui::theme::apply(&h.ctx, super::ThemeKind::ProMedium);
+            install_test_fonts(&h.ctx);
             h.run_steps(3);
             let image = h.render().expect("the GPU renderer");
             let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
@@ -491,21 +447,24 @@ mod tests {
         ];
 
         // (名字, 模式, 填充, busy)
-        let states: [(&str, bool, Option<&str>, bool); 4] = [
+        let states: [(&str, bool, Option<&str>, bool); 5] = [
             ("open-listing", false, None, false),
             ("open-loading", false, Some("loading"), true),
             ("open-error", false, Some("error"), false),
             ("save-empty-name", true, None, false),
+            ("save-with-name", true, Some("num.psd"), false),
         ];
 
         for (name, save, fill, busy) in states {
             let mode = if save { Mode::Save } else { Mode::Open { multiple: false } };
-            let picker = std::cell::RefCell::new(super::Picker::new(mode, Vec::new(), None));
+            let suggested = fill.filter(|f| f.ends_with(".psd"));
+            let picker = std::cell::RefCell::new(super::Picker::new(mode, Vec::new(), suggested));
             {
                 let mut p = picker.borrow_mut();
                 p.set_volumes(vec![crate::vos::model::Volume { uuid: adapter.into(), nick_name: Some("vos_workspace".into()), name: adapter.into() }]);
                 p.enter_root(adapter);
                 match fill {
+                    Some(name) if name.ends_with(".psd") => p.set_entries(files.clone()),
                     Some("loading") => p.retry(),
                     Some("error") => p.fail("VOS storage request failed: no permission (VOS-10046)".to_string()),
                     _ => p.set_entries(files.clone()),
@@ -513,15 +472,9 @@ mod tests {
             }
             let mut h = Harness::builder().with_size(egui::vec2(700.0, 460.0)).build_ui(|ui| {
                 let mut picker = picker.borrow_mut();
-                let _ = super::show(ui.ctx(), &mut picker, super::ThemeKind::ProMedium, busy);
+                let _ = super::show(ui.ctx(), &mut picker, busy);
             });
-            let mut fonts = photocraft_ui_egui::egui_fonts::definitions();
-            let proportional = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
-            for family in ["medium", "semibold"] {
-                fonts.families.insert(egui::FontFamily::Name(family.into()), proportional.clone());
-            }
-            h.ctx.set_fonts(fonts);
-            photocraft_ui_egui::theme::apply(&h.ctx, super::ThemeKind::ProMedium);
+            install_test_fonts(&h.ctx);
             h.run_steps(3);
             let image = h.render().expect("the GPU renderer");
             let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
@@ -530,5 +483,59 @@ mod tests {
             image.save(&path).expect("write the PNG");
             eprintln!("wrote {}", path.display());
         }
+    }
+
+    /// 输入框里的名字能选中、选中后能删掉；`Backspace` 删末尾一个字符。
+    #[test]
+    fn the_name_can_be_selected_and_deleted() {
+        use egui_kittest::Harness;
+
+        let picker = std::cell::RefCell::new(super::Picker::new(Mode::Save, Vec::new(), Some("Untitled-1.psd")));
+        picker.borrow_mut().set_volumes(vec![crate::vos::model::Volume { uuid: "v1".into(), nick_name: None, name: "Space".into() }]);
+        let mut h = Harness::builder().with_size(egui::vec2(640.0, 460.0)).build_ui(|ui| {
+            let mut picker = picker.borrow_mut();
+            super::super::install::own_keyboard(ui.ctx());
+            let _ = super::show(ui.ctx(), &mut picker, false);
+        });
+        install_test_fonts(&h.ctx);
+        h.step();
+        h.event(egui::Event::PointerMoved(egui::pos2(320.0, 220.0)));
+        h.step();
+        h.step();
+        let rect = h.ctx.read_response(super::name_field_id()).expect("the field was drawn").rect;
+        let click = rect.right_center() - egui::vec2(3.0, 0.0);
+        h.event(egui::Event::PointerMoved(click));
+        h.step();
+        h.event(egui::Event::PointerButton { pos: click, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.step();
+        h.event(egui::Event::PointerButton { pos: click, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.step();
+        h.step();
+
+        // 全选：真的选中了才能删。
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.step();
+        h.step();
+        let selected = h
+            .ctx
+            .data(|d| d.get_temp::<egui::text_edit::TextEditState>(super::name_field_id()))
+            .and_then(|s| s.cursor.char_range())
+            .is_some_and(|r| r.primary.index.0 != r.secondary.index.0);
+        assert!(selected, "Cmd+A 要真的选中整段名字");
+        // Delete 清掉选中的内容。
+        h.key_press(egui::Key::Delete);
+        h.step();
+        h.step();
+        assert_eq!(picker.borrow().file_name_text(), "", "Delete 清掉选中的名字");
+
+        // 空框里打名字，Backspace 删末尾一个字符。
+        h.event(egui::Event::Text("poster.psd".into()));
+        h.step();
+        h.step();
+        assert_eq!(picker.borrow().file_name_text(), "poster.psd");
+        h.key_press(egui::Key::Backspace);
+        h.step();
+        h.step();
+        assert_eq!(picker.borrow().file_name_text(), "poster.ps", "Backspace 删末尾");
     }
 }

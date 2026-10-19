@@ -59,6 +59,11 @@ impl Entry {
     pub fn is_dir(&self) -> bool {
         self.kind == "dir"
     }
+
+    /// 列表里显示的名字：`basename` 为空时退回路径的最后一段。
+    pub fn label(&self) -> std::borrow::Cow<'_, str> {
+        if self.basename.trim().is_empty() { super::path::display_name(&self.path).into() } else { self.basename.as_str().into() }
+    }
 }
 
 /// `index` 的载荷：一个目录里的条目。
@@ -537,6 +542,24 @@ mod tests {
     fn a_plain_json_reply_is_left_alone() {
         let body = "{\"code\":0,\"data\":{}}";
         assert_eq!(sse_payload(body), body);
+    }
+
+    /// `basename` 为空或纯空白时，名字取路径的最后一段。
+    #[test]
+    fn an_entry_without_a_basename_falls_back_to_its_path() {
+        let mut entry = Entry {
+            kind: "file".into(),
+            path: "v_vol1://pics/poster.psd".into(),
+            basename: String::new(),
+            extension: "psd".into(),
+            file_size: 573_900,
+            storage: "v_vol1".into(),
+        };
+        assert_eq!(entry.label(), "poster.psd");
+        entry.basename = "   ".into();
+        assert_eq!(entry.label(), "poster.psd", "whitespace is not a name either");
+        entry.basename = "num.psd".into();
+        assert_eq!(entry.label(), "num.psd");
     }
 
     #[test]
