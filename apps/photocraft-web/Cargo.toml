@@ -44,5 +44,7 @@ web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlE
     "Crypto", "FormData", "Request", "Headers"] }
 
 [dev-dependencies]
+# The VOS picker's tests drive the window headlessly (see `vos::picker` and `vos::install`).
+egui_kittest = { workspace = true, features = ["wgpu"] }
 photocraft-paint = { workspace = true }
 photocraft-psd = { workspace = true }

@@ -13,16 +13,26 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+#[cfg(target_arch = "wasm32")]
 use photocraft_ui_egui::{FileDialogAnswer, FileDialogRequest, PhotocraftApp, PlatformRequest, Services};
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::spawn_local;
 
+#[cfg(target_arch = "wasm32")]
 use super::path::{self, FinderPath};
-use super::picker::{self, Action};
+#[cfg(any(target_arch = "wasm32", test))]
+use super::picker;
+#[cfg(target_arch = "wasm32")]
+use super::picker::Action;
 use super::recent::Recent;
-use super::state::{Choice, Mode, Phase, Picker};
+use super::state::Picker;
+#[cfg(target_arch = "wasm32")]
+use super::state::{Choice, Mode, Phase};
+#[cfg(target_arch = "wasm32")]
 use super::{bridge, home, http, model};
 
 #[derive(Default)]
+#[cfg_attr(test, expect(dead_code, reason = "host tests drive the upload scheduling only"))]
 struct State {
     picker: Option<Picker>,
     /// 正在等选择器作答的对话框。停在这里而不是选择器里，这样在途请求永远不会丢掉它
@@ -57,13 +67,14 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
 }
 
 /// 插件是否应当接管文件对话框（桥存在时）。
+#[cfg(target_arch = "wasm32")]
 pub fn active() -> bool {
     bridge::available()
 }
 
-
 ///
 /// 必须在 app 运行前调用一次。没有桥时什么都不改。
+#[cfg(target_arch = "wasm32")]
 pub fn install(services: &mut Services) {
     if !active() {
         log::info!("photocraft-web: no VOS bridge; keeping the browser file dialogs");
@@ -108,7 +119,6 @@ pub fn install(services: &mut Services) {
             };
         }
         // 只暂存：写入器一应答外壳就把文件标为已保存，所以上传本身的失败由 `ui` 报告。
-
         stage(path, bytes);
         Ok(())
     }));
@@ -169,6 +179,7 @@ fn show_dialog(request: FileDialogRequest, reply: photocraft_ui_egui::FileDialog
 }
 
 /// 作答停放的对话框并关闭选择器。
+#[cfg(target_arch = "wasm32")]
 fn answer(choice: Option<Choice>) {
     let (reply, picker) = with(|s| (s.reply.take(), s.picker.take()));
     let Some(reply) = reply else { return };
@@ -208,6 +219,7 @@ fn answer(choice: Option<Choice>) {
 }
 
 /// 每帧：打开已到齐的数据、报告错误、上传保存、绘制选择器，并完成上一帧开始的事。
+#[cfg(target_arch = "wasm32")]
 pub fn ui(app: &mut PhotocraftApp, ctx: &egui::Context) {
     // 首页的"浏览"行：就是普通的 File > Open，由我们自己的对话框作答。
     if with(|s| std::mem::take(&mut s.browse))
@@ -263,6 +275,7 @@ pub fn ui(app: &mut PhotocraftApp, ctx: &egui::Context) {
     }
     let theme = app.ui.theme;
     let action = picker::show(ctx, &mut picker, theme, busy);
+    own_keyboard(ctx, &mut picker, busy);
     let keep = !matches!(action, Action::Cancel);
     with(|s| s.picker = keep.then_some(picker));
     match action {
@@ -273,10 +286,79 @@ pub fn ui(app: &mut PhotocraftApp, ctx: &egui::Context) {
     load(ctx, wanted);
 }
 
+/// 键盘焦点归谁：指针在选择器里时归选择器，出去时归 app。
+///
+/// - **指针移进选择器**：把焦点从窗口交给选择器自己的控件（输入框、按钮）。
+/// - **指针停在里面**（悬停、按着、正在点保存输入框）：不动焦点。
+/// - **指针离开**：焦点还给 app，快捷键照常直到指针再进来。
+pub(crate) fn own_keyboard(ctx: &egui::Context, picker: &mut Picker, busy: bool) {
+    let session = ctx.data(|d| d.get_temp::<Keyboard>(keyboard_id()));
+    let over = ctx.pointer_hover_pos().filter(|pos| ctx.layer_id_at(*pos).is_some_and(|layer| layer.order == egui::Order::Middle));
+    let held = over.is_some_and(|pos| picker.name_field_under_pointer(pos)) || ctx.input(|i| i.pointer.any_down());
+    let picker_id = picker::id();
+    let mut state = session.unwrap_or_default();
+    match (state, over) {
+        // 指针刚进来：键盘归选择器。
+        (Keyboard::App, Some(_)) => {
+            ctx.memory_mut(|m| m.surrender_focus(picker_id));
+            state = Keyboard::Picker;
+        }
+        // 指针已经在里面：只在没人拿着焦点时补一个给窗口，免得按键漏给 app。
+        (Keyboard::Picker, Some(_)) => {
+            if !held && ctx.memory(|m| m.focused()).is_none() {
+                ctx.memory_mut(|m| m.request_focus(picker_id));
+            }
+        }
+        // 指针出去了：键盘还给 app。
+        (Keyboard::Picker, None) => {
+            ctx.memory_mut(|m| m.surrender_focus(picker_id));
+            state = Keyboard::App;
+        }
+        (Keyboard::App, None) => {}
+    }
+    ctx.data_mut(|d| d.insert_temp(keyboard_id(), state));
+    picker.note_keyboard(matches!(state, Keyboard::Picker));
+    // 指针一直在选择器里时，焦点可能空着（对话框刚打开、或用户刚离开又回来），按键就会漏给
+    // app：把键盘交给名字输入框（保存模式）或窗口本身；指针压着输入框的帧除外。
+    //
+    // 拿不到键盘时才请求重绘：输入框刚好这一帧才拿到键盘时，egui 下一帧才生效。
+    if matches!(state, Keyboard::Picker) && !held && !ctx.input(|i| i.pointer.any_click()) && ctx.memory(|m| m.focused()).is_none() {
+        let target = match picker.mode() {
+            super::state::Mode::Save => picker::name_field_id(),
+            _ => picker_id,
+        };
+        ctx.memory_mut(|m| m.request_focus(target));
+        if !ctx.memory(|m| m.has_focus(target)) {
+            ctx.request_repaint();
+        }
+    }
+    // 输入框灰掉（数据在途）时它不响应指针，焦点可能被 egui 丢掉：下一帧再要回来。
+    if busy && ctx.memory(|m| m.has_focus(picker::name_field_id())) {
+        ctx.request_repaint();
+    }
+}
+
+/// 键盘现在归谁（见 [`own_keyboard`]）。
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Keyboard {
+    /// app 拿着，快捷键照常。
+    #[default]
+    App,
+    /// 选择器拿着：指针在里面，按键都归它。
+    Picker,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn keyboard_id() -> egui::Id {
+    egui::Id::new("vos-finder-keyboard")
+}
+
 /// 取回选择器要的东西 —— `Some(None)` 是卷列表，`Some(Some(dir))` 是该目录的条目 —— 并把答案
 /// 交回去。`None`（没要东西）什么都不做。
 ///
 /// 失败进入 `Phase::Error`，屏幕上因此出现重试按钮；`retry` 随后再要一次同样的东西。
+#[cfg(target_arch = "wasm32")]
 fn load(ctx: &egui::Context, wanted: Option<Option<FinderPath>>) {
     let Some(dir) = wanted else { return };
     let ctx = ctx.clone();
@@ -291,12 +373,14 @@ fn load(ctx: &egui::Context, wanted: Option<Option<FinderPath>>) {
 }
 
 /// 一次完成的请求交回的东西：要的卷，或一个目录的条目。
+#[cfg(target_arch = "wasm32")]
 enum Prepare {
     Volumes(Vec<super::model::Volume>),
     Entries(Vec<super::model::Entry>),
 }
 
 /// 把完成的请求交给选择器（它可能已经不在了：用户中途取消了）。
+#[cfg(target_arch = "wasm32")]
 fn answer_locally(ctx: &egui::Context, outcome: Result<Prepare, model::Failure>) {
     with(|s| {
         let Some(picker) = s.picker.as_mut() else { return };
@@ -311,6 +395,7 @@ fn answer_locally(ctx: &egui::Context, outcome: Result<Prepare, model::Failure>)
 
 /// 记录一次保存上传的真实结果。写入器接受字节时外壳就把文件标为已保存，所以失败的
 /// 上传在这里报告。
+#[cfg(target_arch = "wasm32")]
 fn finish_save(path: &str, ticket: u64, result: Result<(), model::Failure>) {
     // 这次上传在途时落地的保存才是更新的副本：不作声，等它。
     let waiting = with(|s| {
@@ -335,6 +420,7 @@ fn finish_save(path: &str, ticket: u64, result: Result<(), model::Failure>) {
 
 /// 持久化首页的列表。被拒（隐私模式、配额）时内存里的列表照常工作，所以本次会话的文件
 /// 仍然显示。
+#[cfg(target_arch = "wasm32")]
 fn store_recent() {
     with(|s| {
         let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) else { return };

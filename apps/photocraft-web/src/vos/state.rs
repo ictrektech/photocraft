@@ -9,6 +9,9 @@
 use super::model::{Entry, Volume};
 use super::path::{self, FinderPath};
 
+/// 保存输入框在空的时候显示的浅色提示。它只是提示，不是名字的一部分。
+pub const FILE_NAME_HINT: &str = "untitled.psd";
+
 /// 对话框用来做什么。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -67,6 +70,10 @@ pub struct Picker {
     file_name: String,
     /// 要列出的扩展名（小写、不带点）。为空则全部列出。
     filter: Vec<String>,
+    /// 上一帧保存输入框画在哪（没画为 `None`）。
+    name_field_rect: Option<egui::Rect>,
+    /// 上一帧键盘是否归选择器（见 `install::own_keyboard`）。
+    owns_keyboard: bool,
 }
 
 impl Picker {
@@ -86,6 +93,8 @@ impl Picker {
             selected: Vec::new(),
             file_name,
             filter: filter.into_iter().map(|e| e.trim_start_matches('.').to_ascii_lowercase()).collect(),
+            name_field_rect: None,
+            owns_keyboard: false,
         }
     }
 
@@ -110,13 +119,41 @@ impl Picker {
         self.wanted.take()
     }
 
-    pub fn file_name(&self) -> &str {
+    /// 把 `name` 当作输入框的整段文本：去掉路径分隔符和控制字符。
+    ///
+    /// 开头的空格留着，只在确认时才 trim。
+    pub fn edit_file_name(&mut self, name: &str) {
+        self.file_name = name.chars().filter(|c| !c.is_control() && *c != '/' && *c != '\\').collect();
+    }
+
+    /// 输入框里要画的名字（也是要保存的名字）。空字段时是空：提示文字（[`FILE_NAME_HINT`]）
+    /// 只画成浅色占位符。
+    pub fn file_name_text(&self) -> &str {
         &self.file_name
     }
 
-    /// 替换保存输入框的文本，忽略用户输入的路径分隔符。
-    pub fn set_file_name(&mut self, name: &str) {
-        self.file_name = name.replace(['/', '\\'], "");
+    /// 记下保存输入框这一帧的位置（没画为 `None`）。
+    pub fn note_name_field_position(&mut self, rect: Option<egui::Rect>) {
+        self.name_field_rect = rect;
+    }
+
+    /// 指针是不是压在输入框上。
+    pub fn name_field_under_pointer(&self, pointer: egui::Pos2) -> bool {
+        self.name_field_rect.is_some_and(|rect| rect.contains(pointer))
+    }
+
+    /// 上一帧键盘是否归选择器。按键只在这个时候才属于名字输入框：焦点交还 app 后，用户在
+    /// 别处打的字不能也进到文件名里。
+    ///
+    /// 读上一帧的值而不是本帧的焦点：egui 在按键释放的那一帧会把焦点清掉，本帧的焦点说明
+    /// 不了这一帧的按键归谁。
+    pub fn owns_keyboard(&self) -> bool {
+        self.owns_keyboard
+    }
+
+    /// 记下这一帧键盘归谁（见 [`Self::owns_keyboard`]）。
+    pub fn note_keyboard(&mut self, owned: bool) {
+        self.owns_keyboard = owned;
     }
 
     /// 要绘制的条目：目录总是显示，文件只在匹配过滤条件时显示。
@@ -428,10 +465,55 @@ mod tests {
         assert_eq!(p.visible_entries().count(), 1);
     }
 
+    /// 空字段里没有名字（提示文字只是占位），敲进去的第一个字符不会丢。
+    #[test]
+    fn an_empty_field_is_not_a_name_and_loses_no_keystroke() {
+        let mut p = Picker::new(Mode::Save, Vec::new(), None);
+        assert_eq!(p.file_name_text(), "", "the placeholder is display only");
+        assert!(p.confirm().is_none(), "an empty field cannot be saved");
+        p.edit_file_name("a");
+        assert_eq!(p.file_name_text(), "a", "the first keystroke must survive");
+        p.edit_file_name("art.psd");
+        assert_eq!(p.file_name_text(), "art.psd", "no stub of the hint survives");
+    }
+
+    #[test]
+    fn the_name_field_text_rebuilds_from_the_picker() {
+        // 输入框显示的文本必须能从选择器重建（`file_name_text`）。空格、全角字符、点号
+        // 都要原样回来。
+        let mut p = Picker::new(Mode::Save, Vec::new(), None);
+        for typed in [" art.psd", "art .psd ", "未命名.psd", "中文.psd", "a b.psd", "..psd"] {
+            p.edit_file_name(typed);
+            assert_eq!(p.file_name_text(), typed, "{typed} comes back unchanged");
+        }
+    }
+
+    #[test]
+    fn the_name_field_tracks_whether_the_pointer_over_it() {
+        // 位置来自上一帧的绘制，没画时为 `None`。
+        let mut p = Picker::new(Mode::Save, Vec::new(), None);
+        assert!(!p.name_field_under_pointer(egui::pos2(10.0, 10.0)), "还没画过就谁都不算");
+        p.note_name_field_position(Some(egui::Rect::from_min_size(egui::pos2(8.0, 40.0), egui::vec2(240.0, 18.0))));
+        assert!(p.name_field_under_pointer(egui::pos2(100.0, 50.0)), "指针压在输入框上");
+        assert!(!p.name_field_under_pointer(egui::pos2(100.0, 90.0)), "下面是按钮行");
+    }
+
+    #[test]
+    fn typing_replaces_the_suggested_name_the_way_a_save_dialog_does() {
+        // 建议的名字在打开时全选，敲字就换掉它。
+        let mut p = Picker::new(Mode::Save, Vec::new(), Some("/home/me/art.psd"));
+        assert_eq!(p.file_name_text(), "art.psd");
+        p.edit_file_name("poster.psd");
+        assert_eq!(p.file_name_text(), "poster.psd");
+        p.set_volumes(vec![volume("vol1", "Space")]);
+        p.set_entries(Vec::new());
+        assert_eq!(p.confirm(), Some(Choice::Save("v_vol1://poster.psd".into())));
+    }
+
     #[test]
     fn save_names_a_file_in_the_current_directory() {
         let mut p = Picker::new(Mode::Save, Vec::new(), Some("/home/me/art.psd"));
-        assert_eq!(p.file_name(), "art.psd", "only the file name is kept");
+        assert_eq!(p.file_name_text(), "art.psd", "only the file name is kept");
         p.set_volumes(vec![volume("vol1", "Space")]);
         p.enter("v_vol1://pics");
         p.set_entries(Vec::new());
@@ -452,9 +534,9 @@ mod tests {
         p.set_volumes(vec![volume("vol1", "Space")]);
         p.set_entries(Vec::new());
         assert!(p.confirm().is_none());
-        p.set_file_name("   ");
+        p.edit_file_name("   ");
         assert!(p.confirm().is_none(), "whitespace is not a name");
-        p.set_file_name("art.psd");
+        p.edit_file_name("art.psd");
         assert!(p.confirm().is_some());
     }
 
@@ -463,8 +545,8 @@ mod tests {
         let mut p = Picker::new(Mode::Save, Vec::new(), None);
         p.set_volumes(vec![volume("vol1", "Space")]);
         p.set_entries(Vec::new());
-        p.set_file_name("../../etc/passwd");
-        assert_eq!(p.file_name(), "....etcpasswd", "separators are dropped, not resolved");
+        p.edit_file_name("../../etc/passwd");
+        assert_eq!(p.file_name_text(), "....etcpasswd", "separators are dropped, not resolved");
         assert_eq!(p.confirm(), Some(Choice::Save("v_vol1://....etcpasswd".into())));
     }
 

@@ -27,9 +27,9 @@ mod bridge;
 mod home;
 #[cfg(target_arch = "wasm32")]
 mod http;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 mod install;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 mod picker;
 
 #[cfg(target_arch = "wasm32")]
