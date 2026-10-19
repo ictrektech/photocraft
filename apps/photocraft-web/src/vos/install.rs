@@ -282,6 +282,7 @@ pub fn ui(app: &mut PhotocraftApp, ctx: &egui::Context) {
     match action {
         Action::Confirm(choice) => answer(Some(choice)),
         Action::Cancel => answer(None),
+        Action::Delete(entry) => remove(&entry.path, ctx),
         Action::None => {}
     }
     load(ctx, wanted);
@@ -308,6 +309,36 @@ pub(crate) fn own_keyboard(ctx: &egui::Context) {
 #[cfg(any(target_arch = "wasm32", test))]
 fn keyboard_id() -> egui::Id {
     egui::Id::new("vos-finder-keyboard")
+}
+
+/// 把 `path` 移到平台的回收站，并从选择器和首页的最近列表里去掉；失败就留在原处并报告。
+#[cfg(target_arch = "wasm32")]
+fn remove(path: &str, ctx: &egui::Context) {
+    let Some(dir) = FinderPath::parse_dir(path) else {
+        with(|s| s.errors.push(format!("{path} is not a VOS storage path")));
+        return;
+    };
+    // 删除接口的 `targets` 是卷内相对路径。
+    let adapter = dir.adapter.clone();
+    let target = dir.dir.trim_start_matches('/').to_string();
+    let path = path.to_string();
+    let ctx = ctx.clone();
+    spawn_local(async move {
+        match http::delete(&adapter, &target).await {
+            Ok(()) => {
+                with(|s| {
+                    // 选择器可能正开着：删掉的条目要立刻从它的列表里消失。
+                    if let Some(picker) = s.picker.as_mut() {
+                        picker.drop_item(&path);
+                    }
+                    s.recent.forget(&path);
+                });
+                store_recent();
+            }
+            Err(e) => with(|s| s.errors.push(e.to_string())),
+        }
+        ctx.request_repaint();
+    });
 }
 
 /// 取回选择器要的东西 —— `Some(None)` 是卷列表，`Some(Some(dir))` 是该目录的条目 —— 并把答案

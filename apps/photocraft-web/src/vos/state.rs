@@ -74,6 +74,8 @@ pub struct Picker {
     theme: ThemeKind,
     /// 要列出的扩展名（小写、不带点）。为空则全部列出。
     filter: Vec<String>,
+    /// 用户右键点了"移到回收站"、等着确认的那份文件。
+    pending_delete: Option<Entry>,
 }
 
 /// 文件名里能留的字符：路径分隔符会换到别的目录，控制字符会截断路径。
@@ -101,6 +103,7 @@ impl Picker {
             file_name,
             theme: ThemeKind::default(),
             filter: filter.into_iter().map(|e| e.trim_start_matches('.').to_ascii_lowercase()).collect(),
+            pending_delete: None,
         }
     }
 
@@ -260,6 +263,23 @@ impl Picker {
             self.selected.clear();
         }
         self.selected.push(Selected { adapter: entry.storage.clone(), path: entry.path.clone() });
+    }
+
+    /// 右键点了删除、等着用户确认的那份文件（没有就是 `None`）。
+    pub fn pending_delete(&self) -> Option<&Entry> {
+        self.pending_delete.as_ref()
+    }
+
+    /// 记下（或清掉）要确认删除的文件。
+    pub fn set_pending_delete(&mut self, entry: Option<Entry>) {
+        self.pending_delete = entry;
+    }
+
+    /// 删掉 `path` 的条目和它的选中状态。
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub fn drop_item(&mut self, path: &str) {
+        self.entries.retain(|e| e.path != path);
+        self.selected.retain(|s| s.path != path);
     }
 
     /// 确认后的选择；对话框还不能确认时为 None（主按钮变灰也是因此）。
@@ -597,6 +617,20 @@ mod tests {
         p.enter("/home/me/pics");
         assert!(matches!(p.phase(), Phase::Error(_)));
         assert!(p.current().is_none());
+    }
+
+    #[test]
+    fn dropping_a_deleted_file_forgets_its_selection() {
+        let a = entry("file", "v_vol1://a.psd", "a.psd", "psd");
+        let b = entry("file", "v_vol1://b.psd", "b.psd", "psd");
+        let mut p = open_picker();
+        p.set_volumes(vec![volume("vol1", "Space")]);
+        p.set_entries(vec![a.clone(), b.clone()]);
+        p.toggle(&a);
+        p.toggle(&b);
+        p.drop_item("v_vol1://a.psd");
+        assert_eq!(p.visible_entries().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["v_vol1://b.psd"]);
+        assert_eq!(p.confirm(), Some(Choice::Open(vec![picked("v_vol1", "v_vol1://b.psd")])), "a deleted file is not handed back");
     }
 
     #[test]

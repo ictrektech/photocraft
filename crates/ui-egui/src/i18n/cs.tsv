@@ -3665,3 +3665,7 @@ navigator	Zoom	Zvětšení
 	Remove after each stroke	Odstranit po každém tahu
 	Apply the removal ({key})	Použít odstranění ({key})
 	Strokes to remove: {n} (Enter applies, Esc cancels)	Tahy k odstranění: {n} (Enter použije, Esc zruší)
+	Move to Recycle Bin	Přesunout do koše
+	Move ‘{name}’ to the Recycle Bin?	Přesunout „{name}“ do koše?
+	You can restore it from the VOS Recycle Bin.	Soubor můžete obnovit z koše VOS.
+	VOS Recycle Bin	Koš VOS

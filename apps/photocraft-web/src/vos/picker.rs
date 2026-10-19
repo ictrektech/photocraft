@@ -5,7 +5,7 @@
 
 use egui::{Context, RichText, Ui};
 use photocraft_ui_egui::i18n;
-use photocraft_ui_egui::theme::Tokens;
+use photocraft_ui_egui::theme::{ThemeKind, Tokens};
 
 use super::model::Entry;
 use super::state::{Choice, Mode, Phase, Picker};
@@ -19,6 +19,8 @@ pub enum Action {
     Confirm(Choice),
     /// 用户取消了（窗口关闭，对话框回取消）。
     Cancel,
+    /// 用户右键点了"移到回收站"并确认了；真正的删除由帧循环做。
+    Delete(Entry),
 }
 
 /// 把选择器画成一个类模态窗口。`busy` 在有在途请求时禁用控件。
@@ -33,6 +35,21 @@ pub fn show(ctx: &Context, picker: &mut Picker, busy: bool) -> Action {
         .show(ctx, |ui| {
             action = body(ui, picker, busy);
         });
+    // 确认窗口画在选择器之后，才盖在它上面。
+    if let Some(entry) = picker.pending_delete().cloned() {
+        return match confirm(ctx, picker.theme(), &entry) {
+            Some(true) => {
+                picker.set_pending_delete(None);
+                Action::Delete(entry)
+            }
+            // 取消，或还没回答：窗口继续开着。
+            Some(false) => {
+                picker.set_pending_delete(None);
+                Action::None
+            }
+            None => Action::None,
+        };
+    }
     action
 }
 
@@ -44,6 +61,31 @@ pub fn id() -> egui::Id {
 /// 保存输入框的 id（见 [`super::install::own_keyboard`]）。
 pub fn name_field_id() -> egui::Id {
     egui::Id::new("vos-finder-name")
+}
+
+/// 删除前的确认窗口。用户的回答：`Some(true)` 确认，`Some(false)` 取消，`None` 还没回答。
+fn confirm(ctx: &Context, theme: ThemeKind, entry: &Entry) -> Option<bool> {
+    let tokens = Tokens::for_kind(theme);
+    let mut answer = None;
+    let message = i18n::fmt(i18n::t("Move ‘{name}’ to the Recycle Bin?"), &[("name", entry.label().as_ref())]);
+    egui::Window::new(i18n::t("Move to Recycle Bin")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).show(
+        ctx,
+        |ui| {
+            ui.add(egui::Label::new(&message).wrap());
+            ui.add_space(6.0);
+            ui.label(RichText::new(i18n::t("You can restore it from the VOS Recycle Bin.")).color(tokens.text_dim).small());
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button(i18n::t("Move to Recycle Bin")).clicked() {
+                    answer = Some(true);
+                }
+                if ui.button(i18n::t("Cancel")).clicked() {
+                    answer = Some(false);
+                }
+            });
+        },
+    );
+    answer
 }
 
 /// 窗口标题。
@@ -128,6 +170,16 @@ fn body(ui: &mut Ui, picker: &mut Picker, busy: bool) -> Action {
                         let name = format!("{icon} {}", entry.label());
                         let button = egui::Button::new(name).selected(!entry.is_dir() && picker.is_selected(&entry.path)).min_size(egui::vec2(240.0, 0.0));
                         let response = ui.add_enabled(!busy, button);
+                        // 目录没有可删的文件，所以菜单只给文件。
+                        if !entry.is_dir() {
+                            response.context_menu(|ui| {
+                                ui.set_min_width(180.0);
+                                if ui.add_enabled(!busy, egui::Button::new(i18n::t("Move to Recycle Bin"))).clicked() {
+                                    picker.set_pending_delete(Some(entry.clone()));
+                                    egui::Popup::close_all(ui.ctx());
+                                }
+                            });
+                        }
                         if response.clicked() {
                             clicked = Some(entry.clone());
                         }
@@ -162,6 +214,10 @@ fn body(ui: &mut Ui, picker: &mut Picker, busy: bool) -> Action {
                 action = picker.confirm().map_or(Action::None, Action::Confirm);
             }
         });
+    }
+    // 右键菜单已经定了要删哪份文件：这一帧不再看回车和按钮。
+    if matches!(action, Action::Delete(_)) {
+        return action;
     }
     if !busy && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         action = Action::Cancel;
@@ -483,6 +539,71 @@ mod tests {
             image.save(&path).expect("write the PNG");
             eprintln!("wrote {}", path.display());
         }
+    }
+
+    /// 目录列表里的文件行右键能弹出"移到回收站"；目录没有菜单。
+    #[test]
+    fn a_browsed_file_offers_delete_on_right_click() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+
+        let adapter = "v_vol1";
+        let picker = std::cell::RefCell::new(super::Picker::new(Mode::Open { multiple: false }, Vec::new(), None));
+        {
+            let mut p = picker.borrow_mut();
+            p.set_theme(photocraft_ui_egui::theme::ThemeKind::ProMedium);
+            p.set_volumes(vec![crate::vos::model::Volume { uuid: adapter.into(), nick_name: None, name: adapter.into() }]);
+            p.enter_root(adapter);
+            p.set_entries(vec![
+                crate::vos::model::Entry {
+                    kind: "dir".into(),
+                    path: format!("{adapter}://folder"),
+                    basename: "folder".into(),
+                    extension: String::new(),
+                    file_size: 4096,
+                    storage: adapter.into(),
+                },
+                crate::vos::model::Entry {
+                    kind: "file".into(),
+                    path: format!("{adapter}://a.psd"),
+                    basename: "a.psd".into(),
+                    extension: "psd".into(),
+                    file_size: 2048,
+                    storage: adapter.into(),
+                },
+            ]);
+        }
+        let actions = std::cell::RefCell::new(Vec::new());
+        let mut h = Harness::builder().with_size(egui::vec2(700.0, 460.0)).build_ui(|ui| {
+            let mut picker = picker.borrow_mut();
+            let action = super::show(ui.ctx(), &mut picker, false);
+            if action != super::Action::None {
+                actions.borrow_mut().push(action);
+            }
+        });
+        install_test_fonts(&h.ctx);
+        h.run_steps(3);
+
+        // 文件：右键弹菜单，点"移到回收站"发出删除。
+        h.get_by_label_contains("a.psd").click_secondary();
+        h.run_steps(2);
+        h.get_by_label("Move to Recycle Bin").click();
+        h.run_steps(4);
+        // 菜单项和确认按钮同名：确认按钮在窗口中央，菜单项贴着鼠标，取靠下的那个。
+        let mut nodes: Vec<_> = h.query_all_by_label("Move to Recycle Bin").collect();
+        nodes.sort_by(|a, b| b.rect().center().y.total_cmp(&a.rect().center().y));
+        nodes.first().expect("the confirm button").click();
+        h.run_steps(4);
+        let deleted = actions.borrow().iter().find_map(|a| match a {
+            super::Action::Delete(entry) => Some(entry.path.clone()),
+            _ => None,
+        });
+        assert_eq!(deleted.as_deref(), Some("v_vol1://a.psd"), "右键删除的是点到的那份文件");
+
+        // 目录：没有菜单可弹。
+        h.get_by_label_contains("folder").click_secondary();
+        h.run_steps(2);
+        assert!(h.query_by_label("Move to Recycle Bin").is_none(), "目录没有可删的文件");
     }
 
     /// 输入框里的名字能选中、选中后能删掉；`Backspace` 删末尾一个字符。

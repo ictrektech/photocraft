@@ -2996,3 +2996,7 @@ curves	Smooth	Сгладить
 	Remove after each stroke	Удалять после каждого штриха
 	Apply the removal ({key})	Применить удаление ({key})
 	Strokes to remove: {n} (Enter applies, Esc cancels)	Штрихов к удалению: {n} (Enter применяет, Esc отменяет)
+	Move to Recycle Bin	Переместить в корзину
+	Move ‘{name}’ to the Recycle Bin?	Переместить «{name}» в корзину?
+	You can restore it from the VOS Recycle Bin.	Файл можно восстановить из корзины VOS.
+	VOS Recycle Bin	Корзина VOS

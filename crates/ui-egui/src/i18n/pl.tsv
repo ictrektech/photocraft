@@ -3648,3 +3648,7 @@ curves	Smooth	Wygładź
 	Remove after each stroke	Usuwaj po każdym pociągnięciu
 	Apply the removal ({key})	Zastosuj usuwanie ({key})
 	Strokes to remove: {n} (Enter applies, Esc cancels)	Pociągnięcia do usunięcia: {n} (Enter stosuje, Esc anuluje)
+	Move to Recycle Bin	Przenieś do kosza
+	Move ‘{name}’ to the Recycle Bin?	Przenieść „{name}” do kosza?
+	You can restore it from the VOS Recycle Bin.	Możesz go przywrócić z kosza VOS.
+	VOS Recycle Bin	Kosz VOS

@@ -3782,3 +3782,7 @@ cameraData	Lens	Lens
 @plural	{n} step|{n} steps	{n} adım
 @plural	{warning} (+{n} more brush preset warning)|{warning} (+{n} more brush preset warnings)	{warning} (+{n} fırça ön ayarı uyarısı daha)
 @plural	{what} with {n} warning|{what} with {n} warnings	{what}, {n} uyarı ile
+	Move to Recycle Bin	Geri Dönüşüm Kutusuna Taşı
+	Move ‘{name}’ to the Recycle Bin?	“{name}” Geri Dönüşüm Kutusuna taşınsın mı?
+	You can restore it from the VOS Recycle Bin.	VOS Geri Dönüşüm Kutusundan geri yükleyebilirsin.
+	VOS Recycle Bin	VOS Geri Dönüşüm Kutusu

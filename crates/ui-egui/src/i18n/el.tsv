@@ -3749,3 +3749,7 @@ curves	Smooth	Εξομάλυνση
 	Remove after each stroke	Αφαίρεση μετά από κάθε πινελιά
 	Apply the removal ({key})	Εφαρμογή της αφαίρεσης ({key})
 	Strokes to remove: {n} (Enter applies, Esc cancels)	Πινελιές προς αφαίρεση: {n} (Enter εφαρμόζει, Esc ακυρώνει)
+	Move to Recycle Bin	Μετακίνηση στον Κάδο
+	Move ‘{name}’ to the Recycle Bin?	Μετακίνηση του «{name}» στον Κάδο;
+	You can restore it from the VOS Recycle Bin.	Μπορείτε να το επαναφέρετε από τον Κάδο του VOS.
+	VOS Recycle Bin	Κάδος VOS

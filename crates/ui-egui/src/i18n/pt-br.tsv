@@ -3841,3 +3841,7 @@ layerLabel	No Color	Sem cor
 	Remove after each stroke	Remover após cada traço
 	Apply the removal ({key})	Aplicar a remoção ({key})
 	Strokes to remove: {n} (Enter applies, Esc cancels)	Traços a remover: {n} (Enter aplica, Esc cancela)
+	Move to Recycle Bin	Mover para a lixeira
+	Move ‘{name}’ to the Recycle Bin?	Mover “{name}” para a lixeira?
+	You can restore it from the VOS Recycle Bin.	Você pode restaurá-lo da lixeira do VOS.
+	VOS Recycle Bin	Lixeira do VOS

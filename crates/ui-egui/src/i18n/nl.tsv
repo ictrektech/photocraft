@@ -3811,3 +3811,7 @@ curves	Smooth	Vloeiend maken
 	Remove after each stroke	Verwijderen na elke streek
 	Apply the removal ({key})	Verwijdering toepassen ({key})
 	Strokes to remove: {n} (Enter applies, Esc cancels)	Streken om te verwijderen: {n} (Enter past toe, Esc annuleert)
+	Move to Recycle Bin	Naar prullenbak verplaatsen
+	Move ‘{name}’ to the Recycle Bin?	‘{name}’ naar de prullenbak verplaatsen?
+	You can restore it from the VOS Recycle Bin.	Je kunt het terugzetten uit de prullenbak van VOS.
+	VOS Recycle Bin	Prullenbak van VOS

@@ -2732,3 +2732,7 @@ curves	Smooth	Suavizar
 	Remove after each stroke	Eliminar después de cada trazo
 	Apply the removal ({key})	Aplicar la eliminación ({key})
 	Strokes to remove: {n} (Enter applies, Esc cancels)	Trazos por eliminar: {n} (Intro aplica, Esc cancela)
+	Move to Recycle Bin	Mover a la papelera
+	Move ‘{name}’ to the Recycle Bin?	¿Mover «{name}» a la papelera?
+	You can restore it from the VOS Recycle Bin.	Puedes restaurarlo desde la papelera de VOS.
+	VOS Recycle Bin	Papelera de VOS

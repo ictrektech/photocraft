@@ -4015,3 +4015,7 @@ navigator	Zoom	Zoom
 	Remove after each stroke	Rimuovi dopo ogni tratto
 	Apply the removal ({key})	Applica la rimozione ({key})
 	Strokes to remove: {n} (Enter applies, Esc cancels)	Tratti da rimuovere: {n} (Invio applica, Esc annulla)
+	Move to Recycle Bin	Sposta nel cestino
+	Move ‘{name}’ to the Recycle Bin?	Spostare «{name}» nel cestino?
+	You can restore it from the VOS Recycle Bin.	Puoi ripristinarlo dal cestino di VOS.
+	VOS Recycle Bin	Cestino di VOS

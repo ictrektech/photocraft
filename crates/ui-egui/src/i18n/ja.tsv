@@ -3661,3 +3661,7 @@ curves	Smooth	スムーズ
 	Remove after each stroke	ストロークごとに削除
 	Apply the removal ({key})	削除を適用 ({key})
 	Strokes to remove: {n} (Enter applies, Esc cancels)	削除するストローク: {n}（Enter で適用、Esc で取り消し）
+	Move to Recycle Bin	ゴミ箱に移動
+	Move ‘{name}’ to the Recycle Bin?	「{name}」をゴミ箱に移動しますか？
+	You can restore it from the VOS Recycle Bin.	VOS のゴミ箱から復元できます。
+	VOS Recycle Bin	VOS のゴミ箱

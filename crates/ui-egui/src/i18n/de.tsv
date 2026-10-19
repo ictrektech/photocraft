@@ -2691,3 +2691,7 @@ curves	Smooth	Glätten
 	Remove after each stroke	Nach jedem Strich entfernen
 	Apply the removal ({key})	Entfernen anwenden ({key})
 	Strokes to remove: {n} (Enter applies, Esc cancels)	Striche zum Entfernen: {n} (Eingabe wendet an, Esc bricht ab)
+	Move to Recycle Bin	In den Papierkorb verschieben
+	Move ‘{name}’ to the Recycle Bin?	„{name}“ in den Papierkorb verschieben?
+	You can restore it from the VOS Recycle Bin.	Du kannst die Datei aus dem VOS-Papierkorb wiederherstellen.
+	VOS Recycle Bin	VOS-Papierkorb

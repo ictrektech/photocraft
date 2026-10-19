@@ -3052,3 +3052,7 @@ curves	Smooth	Lisser
 	Remove after each stroke	Supprimer après chaque trait
 	Apply the removal ({key})	Appliquer la suppression ({key})
 	Strokes to remove: {n} (Enter applies, Esc cancels)	Traits à supprimer : {n} (Entrée applique, Échap annule)
+	Move to Recycle Bin	Déplacer vers la corbeille
+	Move ‘{name}’ to the Recycle Bin?	Déplacer « {name} » vers la corbeille ?
+	You can restore it from the VOS Recycle Bin.	Vous pouvez le restaurer depuis la corbeille VOS.
+	VOS Recycle Bin	Corbeille VOS

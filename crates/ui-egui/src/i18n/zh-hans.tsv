@@ -2656,3 +2656,7 @@ curves	Smooth	平滑
 	Remove after each stroke	每次描边后移除
 	Apply the removal ({key})	应用移除 ({key})
 	Strokes to remove: {n} (Enter applies, Esc cancels)	待移除的描边：{n}（Enter 应用，Esc 取消）
+	Move to Recycle Bin	移到回收站
+	Move ‘{name}’ to the Recycle Bin?	将“{name}”移到回收站？
+	You can restore it from the VOS Recycle Bin.	你可以从 VOS 回收站恢复它。
+	VOS Recycle Bin	VOS 回收站

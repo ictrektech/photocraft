@@ -263,6 +263,23 @@ async fn finish(promise: Result<js_sys::Promise<JsValue>, JsValue>) -> Result<Js
     JsFuture::from(js_sys::Promise::resolve(&promise.map_err(js)?)).await.map_err(js)
 }
 
+/// 把 `target` 移进回收站：平台的删除只是挪到卷里的 `.recycle/` 下，不是抹掉。
+///
+/// `adapter` 必填，空的话平台以 10045 拒绝。`target` 是卷内的路径：完整 Finder 路径去掉
+/// adapter 和 `//` 之后的那段。
+pub async fn delete(adapter: &str, target: &str) -> Result<(), Failure> {
+    let request = serde_json::json!({ "adapter": adapter, "path": "", "targets": [target] }).to_string();
+    let url = format!("{FINDER}/delete");
+    let request = JsValue::from_str(&request);
+    let token = token().await?;
+    let mut text = send_body(&url, &request, &token).await?;
+    if refused(&text) {
+        let token = renew().await?;
+        text = send_body(&url, &request, &token).await?;
+    }
+    body::<String>(&text).map(|_| ())
+}
+
 /// 把 `bytes` 以 `name` 上传到目录 `dir`，替换同名文件。
 ///
 /// `conflict_strategy=overwrite` 必填：平台默认是 `reject`，那样一次普通的 Ctrl+S 就会变成
