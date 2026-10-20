@@ -46,6 +46,10 @@ xtask/                       cargo xtask layers | wasm | ci | stats | corpus | t
 
 ## 3. Golden rules
 
+### Never commit without the maintainer's explicit consent
+
+The human owns the history. Make the change, get the gate green, show the diff — then stop. `git commit`, `git commit --amend`, `git rebase`, `git cherry-pick`, `git reset`, `git stash` and anything else that rewrites or creates commits all wait for a clear "commit it" from them. Staging (`git add`) is fine when you need it to compare against the index, but already-staged work is never unstaged or reset without asking. Preparing commits (splitting a change into two, writing the messages) is part of the work; landing them is not.
+
 ### Never crash (outranks feature work)
 
 People trust PhotoCraft with their work, and a crash loses it. A malformed file, a bad command or MCP param, a corrupt settings file, an odd keystroke or a full disk must produce an error the user or agent can act on, never a panic. Don't ship a feature by adding a panic path; fix a crash before building on top of it. The shared standard is `../craftrules/standards/never-crash.md`.
