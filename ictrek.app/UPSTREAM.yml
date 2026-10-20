@@ -10,9 +10,9 @@
 # core_bumped true when we raised the core version ourselves, so the upstream base is
 #             older than the core in VERSION (then core_base names that upstream core
 #             and VERSION carries it as SemVer build metadata, +up<core_base>)
-core: "0.8.2"
+core: "0.10.0"
 repo: storytold/photocraft
-ref: "d43db3e15"
-base_sha: "d43db3e15"
-fork_build: 4
+ref: "8407d9ccb"
+base_sha: "8407d9ccb"
+fork_build: 1
 core_bumped: false
