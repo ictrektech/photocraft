@@ -283,6 +283,7 @@ pub fn ui(app: &mut PhotocraftApp, ctx: &egui::Context) {
         Action::Confirm(choice) => answer(Some(choice)),
         Action::Cancel => answer(None),
         Action::Delete(entry) => remove(&entry.path, ctx),
+        Action::Rename { entry, name, path } => rename(&entry.path, &name, &path, ctx),
         Action::None => {}
     }
     load(ctx, wanted);
@@ -311,13 +312,54 @@ fn keyboard_id() -> egui::Id {
     egui::Id::new("vos-finder-keyboard")
 }
 
+/// 把 `path` 改成 `name`，成功后就把它记成新路径 `renamed`；失败就报告，列表里的名字保持
+/// 原样。
+#[cfg(target_arch = "wasm32")]
+fn rename(path: &str, name: &str, renamed: &str, ctx: &egui::Context) {
+    let Some(file) = parse_or_report(path) else { return };
+    // rename 的 `path` 是**文件所在目录**的全路径（带 adapter scheme），与 index 回复里的
+    // dirname 同形；delete 的 `targets` 才是卷内相对路径。
+    let Some(dir) = file.parent() else {
+        with(|s| s.errors.push(format!("{path} is at a volume root, nothing to rename")));
+        return;
+    };
+    let adapter = dir.adapter.clone();
+    let directory = dir.api_path();
+    let target = path.to_string();
+    let name = name.to_string();
+    let renamed = renamed.to_string();
+    let ctx = ctx.clone();
+    spawn_local(async move {
+        match http::rename(&adapter, &directory, &target, &name).await {
+            Ok(()) => {
+                with(|s| {
+                    // 首页的"VOS storage"就是最近列表。
+                    s.recent.rename(&target, &renamed);
+                });
+                store_recent();
+            }
+            Err(e) => with(|s| s.errors.push(e.to_string())),
+        }
+        ctx.request_repaint();
+    });
+}
+
+/// 解析 Finder 路径；不是的话把原因记进错误列表并返回 `None`。
+#[cfg(target_arch = "wasm32")]
+fn parse_or_report(path: &str) -> Option<FinderPath> {
+    match FinderPath::parse_dir(path) {
+        Some(dir) => Some(dir),
+        None => {
+            with(|s| s.errors.push(format!("{path} is not a VOS storage path")));
+            None
+        }
+    }
+}
+
 /// 把 `path` 移到平台的回收站，并从选择器和首页的最近列表里去掉；失败就留在原处并报告。
 #[cfg(target_arch = "wasm32")]
 fn remove(path: &str, ctx: &egui::Context) {
-    let Some(dir) = FinderPath::parse_dir(path) else {
-        with(|s| s.errors.push(format!("{path} is not a VOS storage path")));
-        return;
-    };
+    let Some(dir) = parse_or_report(path) else { return };
     // 删除接口的 `targets` 是卷内相对路径。
     let adapter = dir.adapter.clone();
     let target = dir.dir.trim_start_matches('/').to_string();

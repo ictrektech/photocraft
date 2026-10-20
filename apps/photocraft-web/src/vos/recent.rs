@@ -49,6 +49,15 @@ impl Recent {
         self.paths.retain(|p| p != path);
     }
 
+    /// `from` 改名成 `to`，位置不变。
+    pub fn rename(&mut self, from: &str, to: &str) {
+        let Some(at) = self.paths.iter().position(|p| p == from) else { return };
+        if super::path::adapter_of(to).is_none() {
+            return;
+        }
+        self.paths[at] = to.to_string();
+    }
+
     /// 这些路径，最新的在前。
     pub fn paths(&self) -> &[String] {
         &self.paths
@@ -98,6 +107,21 @@ mod tests {
         r.record("a.psd");
         r.record("https://example.com/a.psd");
         assert!(r.paths().is_empty(), "本地或网络路径不是 VOS 存储");
+    }
+
+    /// 改名后首页那一行要指向新路径，位置不变；不在列表里的路径改名不影响列表。
+    #[test]
+    fn renaming_a_path_keeps_its_position_and_ignores_unknown_ones() {
+        let mut r = Recent::default();
+        r.record("v_abc://a.psd");
+        r.record("v_abc://b.psd");
+        r.record("v_abc://c.psd");
+        r.rename("v_abc://b.psd", "v_abc://b-renamed.psd");
+        assert_eq!(r.paths(), ["v_abc://c.psd", "v_abc://b-renamed.psd", "v_abc://a.psd"], "换了路径，位置不变");
+        r.rename("v_abc://gone.psd", "v_abc://x.psd");
+        assert_eq!(r.paths().len(), 3, "不在列表里的路径不改动列表");
+        r.rename("v_abc://c.psd", "not-a-finder-path");
+        assert_eq!(r.paths()[0], "v_abc://c.psd", "不是 Finder 路径的新名字不写进列表");
     }
 
     #[test]

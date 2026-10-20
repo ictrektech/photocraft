@@ -76,6 +76,13 @@ pub struct Picker {
     filter: Vec<String>,
     /// 用户右键点了"移到回收站"、等着确认的那份文件。
     pending_delete: Option<Entry>,
+    /// 正在改名的条目和新名字：右键"重命名"打开，确认或取消后清掉。
+    renaming: Option<(Entry, String)>,
+}
+
+/// `path` 换成新名字后的路径：只换最后一段，目录和 scheme 不动。
+fn renamed_path(path: &str, name: &str) -> String {
+    format!("{}/{name}", path.rsplit_once('/').map_or(path, |(dir, _)| dir))
 }
 
 /// 文件名里能留的字符：路径分隔符会换到别的目录，控制字符会截断路径。
@@ -83,6 +90,15 @@ pub struct Picker {
 /// `egui::TextEdit` 直接写 [`Picker::file_name`]，不做过滤，所以确认时要滤掉。
 fn clean_name(name: &str) -> String {
     name.chars().filter(|c| !c.is_control() && *c != '/' && *c != '\\').collect()
+}
+
+/// 名字没有扩展名时补上 `extension`。结尾的点不算扩展名。
+fn with_extension(name: String, extension: &str) -> String {
+    let has_extension = std::path::Path::new(&name).extension().is_some_and(|e| !e.is_empty());
+    if extension.is_empty() || has_extension {
+        return name;
+    }
+    format!("{}.{extension}", name.trim_end_matches('.'))
 }
 
 impl Picker {
@@ -104,6 +120,7 @@ impl Picker {
             theme: ThemeKind::default(),
             filter: filter.into_iter().map(|e| e.trim_start_matches('.').to_ascii_lowercase()).collect(),
             pending_delete: None,
+            renaming: None,
         }
     }
 
@@ -273,6 +290,47 @@ impl Picker {
     /// 记下（或清掉）要确认删除的文件。
     pub fn set_pending_delete(&mut self, entry: Option<Entry>) {
         self.pending_delete = entry;
+    }
+
+    /// 正在改名的条目。
+    pub fn renaming(&self) -> Option<&(Entry, String)> {
+        self.renaming.as_ref()
+    }
+
+    /// 改名输入框编辑的那个名字。
+    pub fn rename_name_mut(&mut self) -> Option<&mut String> {
+        self.renaming.as_mut().map(|(_, name)| name)
+    }
+
+    /// 打开改名输入框，初始值是条目现在的名字。
+    pub fn start_rename(&mut self, entry: Entry) {
+        let name = entry.label().into_owned();
+        self.renaming = Some((entry, name));
+    }
+
+    /// 关掉改名输入框。确认且名字真的变了时返回（原条目, 新名字, 新路径），本地列表也同步
+    /// 改名；空名字和没变的名字返回 `None`。
+    ///
+    /// 名字和 `path` 一起改，`path` 是下次请求的 `target`。
+    pub fn finish_rename(&mut self, confirmed: bool) -> Option<(Entry, String, String)> {
+        let (entry, name) = self.renaming.take()?;
+        let name = clean_name(name.trim());
+        if !confirmed || name.is_empty() || name == entry.label() {
+            return None;
+        }
+        let name = with_extension(name, &entry.extension);
+        let renamed = renamed_path(&entry.path, &name);
+        // 扩展名一起换掉。
+        let extension = std::path::Path::new(&name).extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+        for e in self.entries.iter_mut().filter(|e| e.path == entry.path) {
+            e.basename = name.clone();
+            e.path = renamed.clone();
+            e.extension = extension.clone();
+        }
+        for s in self.selected.iter_mut().filter(|s| s.path == entry.path) {
+            s.path = renamed.clone();
+        }
+        Some((entry, name, renamed))
     }
 
     /// 删掉 `path` 的条目和它的选中状态。
@@ -617,6 +675,65 @@ mod tests {
         p.enter("/home/me/pics");
         assert!(matches!(p.phase(), Phase::Error(_)));
         assert!(p.current().is_none());
+    }
+
+    /// 补扩展名的边界：结尾的点不算扩展名，已有的扩展名不动。
+    #[test]
+    fn a_missing_extension_is_added_back() {
+        assert_eq!(with_extension("poster".into(), "psd"), "poster.psd");
+        assert_eq!(with_extension("poster.".into(), "psd"), "poster.psd", "结尾的点不算扩展名");
+        assert_eq!(with_extension("poster..".into(), "psd"), "poster.psd");
+        assert_eq!(with_extension("poster.tif".into(), "psd"), "poster.tif", "已有的扩展名不动");
+        assert_eq!(with_extension(".hidden".into(), "psd"), ".hidden.psd", "只有名字的文件也要有扩展名");
+        assert_eq!(with_extension("poster".into(), ""), "poster", "条目没有扩展名时不补");
+    }
+
+    /// 改名只换最后一段，`path` 也一起改。
+    #[test]
+    fn renaming_moves_the_path_and_skips_no_ops() {
+        let mut p = open_picker();
+        p.set_volumes(vec![volume("vol1", "Space")]);
+        let root = entry("file", "v_vol1://hello.psd", "hello.psd", "psd");
+        let nested = entry("file", "v_vol1://pics/a.psd", "a.psd", "psd");
+        p.set_entries(vec![root.clone(), nested.clone()]);
+        let paths = |p: &Picker| p.visible_entries().map(|e| e.path.clone()).collect::<Vec<_>>();
+        let rename = |p: &mut Picker, entry: Entry, to: &str| {
+            p.start_rename(entry);
+            *p.rename_name_mut().expect("renaming") = to.to_string();
+            p.finish_rename(true)
+        };
+        let names = |p: &Picker| p.visible_entries().map(|e| e.basename.clone()).collect::<Vec<_>>();
+
+        // 没变的名字和空名字都不发请求，输入框照样关掉。
+        p.start_rename(root.clone());
+        assert_eq!(p.renaming().map(|(_, n)| n.as_str()), Some("hello.psd"), "输入框预填现在的名字");
+        assert_eq!(p.finish_rename(true), None, "名字没变不需要请求");
+        assert!(p.renaming().is_none(), "输入框已关掉");
+        assert_eq!(rename(&mut p, root.clone(), "  "), None, "空名字不需要请求");
+
+        // 卷根：scheme 后面直接是名字。
+        assert!(rename(&mut p, root.clone(), "hello1234.psd").is_some());
+        assert_eq!(paths(&p), ["v_vol1://hello1234.psd", "v_vol1://pics/a.psd"]);
+
+        // 子目录：只有最后一段换掉。
+        assert!(rename(&mut p, nested.clone(), "poster.psd").is_some());
+        assert_eq!(paths(&p), ["v_vol1://hello1234.psd", "v_vol1://pics/poster.psd"]);
+
+        // 没有扩展名时补回原来的。
+        let current = p.visible_entries().find(|e| e.basename == "poster.psd").cloned().expect("the renamed file");
+        assert!(rename(&mut p, current, "poster").is_some());
+        assert_eq!(names(&p), ["hello1234.psd", "poster.psd"], "补回扩展名");
+        let current = p.visible_entries().find(|e| e.basename == "poster.psd").cloned().expect("the renamed file");
+        assert!(rename(&mut p, current, "poster.tif").is_some());
+        // 过滤器只留 psd，改成 tif 后这一行就该消失。
+        assert_eq!(names(&p), ["hello1234.psd"], "扩展名跟着改，不再匹配过滤器");
+
+        // 取消：什么都不改。
+        let current = p.entries.iter().find(|e| e.basename == "poster.tif").cloned().expect("the renamed file");
+        p.start_rename(current);
+        *p.rename_name_mut().expect("renaming") = "other.psd".into();
+        assert_eq!(p.finish_rename(false), None);
+        assert_eq!(paths(&p), ["v_vol1://hello1234.psd"], "取消后仍然是 tif，仍然被过滤");
     }
 
     #[test]

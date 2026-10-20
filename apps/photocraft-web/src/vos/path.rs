@@ -119,6 +119,15 @@ mod tests {
         assert_eq!(dir.child("a.psd"), "v_abc://pics/raw/a.psd");
     }
 
+    /// 两个接口的 `path` 形式不同：`rename` 要带 scheme 的目录全路径（与 index 回复里的
+    /// `dirname` 同形），`delete` 的 `targets` 要卷内相对路径。
+    #[test]
+    fn rename_takes_the_directory_full_path_and_delete_the_relative_one() {
+        let file = FinderPath::parse_dir("v_abc://pics/a.psd").expect("a finder path");
+        assert_eq!(file.parent().map(|d| d.api_path()), Some("v_abc://pics".into()), "rename 的 path 是文件所在目录");
+        assert_eq!(file.dir.trim_start_matches('/'), "pics/a.psd", "delete 的 targets 是文件本身");
+    }
+
     #[test]
     fn parse_dir_reads_both_the_root_and_a_nested_directory() {
         assert_eq!(FinderPath::parse_dir("v_abc://"), Some(FinderPath::root("v_abc")));

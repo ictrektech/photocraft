@@ -21,6 +21,8 @@ pub enum Action {
     Cancel,
     /// 用户右键点了"移到回收站"并确认了；真正的删除由帧循环做。
     Delete(Entry),
+    /// 用户把 `entry` 改名成 `name`，新路径是 `path`；请求由帧循环发。
+    Rename { entry: Entry, name: String, path: String },
 }
 
 /// 把选择器画成一个类模态窗口。`busy` 在有在途请求时禁用控件。
@@ -35,7 +37,10 @@ pub fn show(ctx: &Context, picker: &mut Picker, busy: bool) -> Action {
         .show(ctx, |ui| {
             action = body(ui, picker, busy);
         });
-    // 确认窗口画在选择器之后，才盖在它上面。
+    // 改名和删除的窗口画在选择器之后。
+    if picker.renaming().is_some() {
+        return rename_dialog(ctx, picker);
+    }
     if let Some(entry) = picker.pending_delete().cloned() {
         return match confirm(ctx, picker.theme(), &entry) {
             Some(true) => {
@@ -86,6 +91,46 @@ fn confirm(ctx: &Context, theme: ThemeKind, entry: &Entry) -> Option<bool> {
         },
     );
     answer
+}
+
+/// 改名窗口；返回这一帧要做的动作（用户还没回答时是 `Action::None`）。
+fn rename_dialog(ctx: &Context, picker: &mut Picker) -> Action {
+    let mut answer = None;
+    egui::Window::new(i18n::t("Rename")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0)).show(ctx, |ui| {
+        ui.add(egui::Label::new(i18n::t("New name")).wrap());
+        ui.add_space(6.0);
+        let enter = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        // Escape 关掉改名窗。
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            answer = Some(false);
+        }
+        // `renaming` 为 `None` 时不画输入框。
+        let Some(name) = picker.rename_name_mut() else { return };
+        let empty = name.trim().is_empty();
+        let response = ui.add(egui::TextEdit::singleline(name).id(rename_field_id()).desired_width(260.0).min_size(egui::vec2(260.0, 20.0)));
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if (enter && response.has_focus()) || (!empty && ui.button(i18n::t("OK")).clicked()) {
+                answer = Some(true);
+            }
+            if ui.button(i18n::t("Cancel")).clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    match answer {
+        Some(true) => picker.finish_rename(true).map_or(Action::None, |(entry, name, path)| Action::Rename { entry, name, path }),
+        Some(false) => {
+            picker.finish_rename(false);
+            Action::None
+        }
+        None => Action::None,
+    }
+}
+
+/// 改名输入框的 id。
+pub fn rename_field_id() -> egui::Id {
+    egui::Id::new("vos-finder-rename")
 }
 
 /// 窗口标题。
@@ -174,6 +219,10 @@ fn body(ui: &mut Ui, picker: &mut Picker, busy: bool) -> Action {
                         if !entry.is_dir() {
                             response.context_menu(|ui| {
                                 ui.set_min_width(180.0);
+                                if ui.add_enabled(!busy, egui::Button::new(i18n::t("Rename"))).clicked() {
+                                    picker.start_rename(entry.clone());
+                                    egui::Popup::close_all(ui.ctx());
+                                }
                                 if ui.add_enabled(!busy, egui::Button::new(i18n::t("Move to Recycle Bin"))).clicked() {
                                     picker.set_pending_delete(Some(entry.clone()));
                                     egui::Popup::close_all(ui.ctx());
@@ -539,6 +588,95 @@ mod tests {
             image.save(&path).expect("write the PNG");
             eprintln!("wrote {}", path.display());
         }
+    }
+
+    /// 一个浏览到卷根、列着 `a.psd` 的选择器，以及它发出的动作。
+    fn rename_harness() -> (&'static std::cell::RefCell<super::Picker>, &'static std::cell::RefCell<Vec<super::Action>>, egui_kittest::Harness<'static>) {
+        use egui_kittest::Harness;
+
+        let adapter = "v_vol1";
+        // 这两个状态泄漏成 'static，harness 的闭包借用它们。
+        let picker: &'static std::cell::RefCell<super::Picker> =
+            Box::leak(Box::new(std::cell::RefCell::new(super::Picker::new(Mode::Open { multiple: false }, Vec::new(), None))));
+        {
+            let mut p = picker.borrow_mut();
+            p.set_theme(photocraft_ui_egui::theme::ThemeKind::ProMedium);
+            p.set_volumes(vec![crate::vos::model::Volume { uuid: adapter.into(), nick_name: None, name: adapter.into() }]);
+            p.enter_root(adapter);
+            p.set_entries(vec![crate::vos::model::Entry {
+                kind: "file".into(),
+                path: format!("{adapter}://a.psd"),
+                basename: "a.psd".into(),
+                extension: "psd".into(),
+                file_size: 2048,
+                storage: adapter.into(),
+            }]);
+        }
+        let actions: &'static std::cell::RefCell<Vec<super::Action>> = Box::leak(Box::new(std::cell::RefCell::new(Vec::new())));
+        let mut h = Harness::builder().with_size(egui::vec2(700.0, 460.0)).build_ui(|ui| {
+            let mut picker = picker.borrow_mut();
+            let action = super::show(ui.ctx(), &mut picker, false);
+            if action != super::Action::None {
+                actions.borrow_mut().push(action);
+            }
+        });
+        install_test_fonts(&h.ctx);
+        h.run_steps(3);
+        (picker, actions, h)
+    }
+
+    /// 改名窗开着时 Escape 只取消改名，不关整个对话框。
+    #[test]
+    fn escape_cancels_the_rename_and_leaves_the_picker_open() {
+        use egui_kittest::kittest::Queryable;
+
+        let (picker, actions, mut h) = rename_harness();
+        h.get_by_label_contains("a.psd").click_secondary();
+        h.run_steps(2);
+        h.get_by_label("Rename").click();
+        h.run_steps(3);
+        assert!(picker.borrow().renaming().is_some(), "改名窗开着");
+
+        h.key_press(egui::Key::Escape);
+        h.run_steps(3);
+        assert!(picker.borrow().renaming().is_none(), "Escape 关掉改名窗");
+        assert!(actions.borrow().is_empty(), "不发出任何动作，对话框也没关: {:?}", actions.borrow());
+    }
+
+    /// 文件行右键能打开改名窗口，改完发出 `Action::Rename`。
+    #[test]
+    fn a_browsed_file_can_be_renamed_from_the_context_menu() {
+        use egui_kittest::kittest::Queryable;
+
+        let (picker, actions, mut h) = rename_harness();
+
+        h.get_by_label_contains("a.psd").click_secondary();
+        h.run_steps(2);
+        h.get_by_label("Rename").click();
+        h.run_steps(3);
+        assert_eq!(picker.borrow().renaming().map(|(_, n)| n.as_str()), Some("a.psd"), "输入框预填现在的名字");
+
+        // 点进改名输入框，全选旧名字再敲新的，回车确认。
+        let at = h.ctx.read_response(super::rename_field_id()).expect("the rename field was drawn").rect.center();
+        h.event(egui::Event::PointerMoved(at));
+        h.step();
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.step();
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.run_steps(2);
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.step();
+        h.step();
+        h.event(egui::Event::Text("poster.psd".into()));
+        h.step();
+        h.step();
+        h.key_press(egui::Key::Enter);
+        h.run_steps(4);
+        let renamed = actions.borrow().iter().find_map(|a| match a {
+            super::Action::Rename { entry, name, .. } => Some((entry.path.clone(), name.clone())),
+            _ => None,
+        });
+        assert_eq!(renamed, Some(("v_vol1://a.psd".to_string(), "poster.psd".to_string())), "改名发出的是新名字: {:?}", actions.borrow());
     }
 
     /// 目录列表里的文件行右键能弹出"移到回收站"；目录没有菜单。

@@ -266,11 +266,21 @@ async fn finish(promise: Result<js_sys::Promise<JsValue>, JsValue>) -> Result<Js
 /// 把 `target` 移进回收站：平台的删除只是挪到卷里的 `.recycle/` 下，不是抹掉。
 ///
 /// `adapter` 必填，空的话平台以 10045 拒绝。`target` 是卷内的路径：完整 Finder 路径去掉
-/// adapter 和 `//` 之后的那段。
+/// adapter 和 `//` 之后的那段。`path` 是空串。
 pub async fn delete(adapter: &str, target: &str) -> Result<(), Failure> {
-    let request = serde_json::json!({ "adapter": adapter, "path": "", "targets": [target] }).to_string();
-    let url = format!("{FINDER}/delete");
-    let request = JsValue::from_str(&request);
+    post_finder("delete", serde_json::json!({ "adapter": adapter, "path": "", "targets": [target] })).await
+}
+
+/// 把 `target` 改名成 `name`。`path` 是它所在的目录（带 adapter scheme 的全路径），平台用它
+/// 定位；`target` 是文件自己的全路径。
+pub async fn rename(adapter: &str, path: &str, target: &str, name: &str) -> Result<(), Failure> {
+    post_finder("rename", serde_json::json!({ "adapter": adapter, "path": path, "target": target, "name": name })).await
+}
+
+/// 往 Finder 的一个 `action` 发 `payload`；令牌过期时刷新一次再试。
+async fn post_finder(action: &str, payload: serde_json::Value) -> Result<(), Failure> {
+    let url = format!("{FINDER}/{action}");
+    let request = JsValue::from_str(&payload.to_string());
     let token = token().await?;
     let mut text = send_body(&url, &request, &token).await?;
     if refused(&text) {
