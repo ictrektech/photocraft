@@ -286,6 +286,11 @@ pub async fn rename(adapter: &str, path: &str, target: &str, name: &str) -> Resu
     post_finder("rename", serde_json::json!({ "adapter": adapter, "path": path, "target": target, "name": name })).await
 }
 
+/// 在 `parent` 里建一个叫 `name` 的目录。`path` 是父目录的全路径。
+pub async fn new_folder(parent: &FinderPath, name: &str) -> Result<(), Failure> {
+    post_finder("new_folder", serde_json::json!({ "adapter": parent.adapter, "path": parent.api_path(), "name": name })).await
+}
+
 /// 往 Finder 的一个 `action` 发 `payload`；令牌过期时刷新一次再试。
 async fn post_finder(action: &str, payload: serde_json::Value) -> Result<(), Failure> {
     let url = format!("{FINDER}/{action}");

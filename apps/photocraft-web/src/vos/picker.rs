@@ -194,10 +194,10 @@ fn body(ui: &mut Ui, picker: &mut Picker, busy: bool) -> Action {
                 if picker.volumes().is_empty() {
                     ui.label(RichText::new(i18n::t("No storage space is available")).color(tokens.text_dim));
                 }
-                // `enter_root` 需要可变借用 `picker`，所以先把点击的结果拷出借用。
+                // `enter_default` 需要可变借用 `picker`，所以先把点击的结果拷出借用。
                 let clicked = picker.volumes().iter().find(|v| ui.add_enabled(!busy, egui::Button::new(v.label())).clicked()).map(|v| v.adapter());
                 if let Some(adapter) = clicked {
-                    picker.enter_root(&adapter);
+                    picker.enter_default(&adapter);
                 }
             });
         }
@@ -419,7 +419,7 @@ mod tests {
             super::Action::Confirm(crate::vos::state::Choice::Save(path)) => Some(path.clone()),
             _ => None,
         });
-        assert_eq!(saved.as_deref(), Some("v_v1://new.psd"), "输入的完整文件名就是保存路径");
+        assert_eq!(saved.as_deref(), Some("v_v1://assets-psd/new.psd"), "输入的完整文件名就是保存路径");
     }
 
     /// 键盘不归选择器时，按的键也不能进到文件名里。
@@ -497,7 +497,7 @@ mod tests {
             {
                 let mut p = picker.borrow_mut();
                 p.set_volumes(vec![crate::vos::model::Volume { uuid: adapter.into(), nick_name: Some("vos_workspace".into()), name: adapter.into() }]);
-                p.enter_root(adapter);
+                p.enter_default(adapter);
                 match (fail, files) {
                     (Some(message), _) => p.fail(message),
                     (None, Some(files)) => p.set_entries(files),
@@ -567,7 +567,7 @@ mod tests {
             {
                 let mut p = picker.borrow_mut();
                 p.set_volumes(vec![crate::vos::model::Volume { uuid: adapter.into(), nick_name: Some("vos_workspace".into()), name: adapter.into() }]);
-                p.enter_root(adapter);
+                p.enter_default(adapter);
                 match fill {
                     Some(name) if name.ends_with(".psd") => p.set_entries(files.clone()),
                     Some("loading") => p.retry(),
@@ -602,7 +602,7 @@ mod tests {
             let mut p = picker.borrow_mut();
             p.set_theme(photocraft_ui_egui::theme::ThemeKind::ProMedium);
             p.set_volumes(vec![crate::vos::model::Volume { uuid: adapter.into(), nick_name: None, name: adapter.into() }]);
-            p.enter_root(adapter);
+            p.enter_default(adapter);
             p.set_entries(vec![crate::vos::model::Entry {
                 kind: "file".into(),
                 path: format!("{adapter}://a.psd"),
@@ -691,7 +691,7 @@ mod tests {
             let mut p = picker.borrow_mut();
             p.set_theme(photocraft_ui_egui::theme::ThemeKind::ProMedium);
             p.set_volumes(vec![crate::vos::model::Volume { uuid: adapter.into(), nick_name: None, name: adapter.into() }]);
-            p.enter_root(adapter);
+            p.enter_default(adapter);
             p.set_entries(vec![
                 crate::vos::model::Entry {
                     kind: "dir".into(),

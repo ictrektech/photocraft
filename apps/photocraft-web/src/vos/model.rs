@@ -170,6 +170,11 @@ impl Failure {
     pub fn is_missing(&self) -> bool {
         self.code == 10017
     }
+
+    /// 平台说这个路径不存在（`ItemNotExist`）。
+    pub fn is_not_found(&self) -> bool {
+        self.code == 10007
+    }
 }
 
 /// 对查询参数值做百分号编码（路径里带 `/`、空格和非 ASCII 名字）。

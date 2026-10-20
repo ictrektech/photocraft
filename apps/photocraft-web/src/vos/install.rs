@@ -411,15 +411,40 @@ enum Prepare {
 /// 把完成的请求交给选择器（它可能已经不在了：用户中途取消了）。
 #[cfg(target_arch = "wasm32")]
 fn answer_locally(ctx: &egui::Context, outcome: Result<Prepare, model::Failure>) {
+    let mut mkdir = None;
     with(|s| {
         let Some(picker) = s.picker.as_mut() else { return };
         match outcome {
             Ok(Prepare::Volumes(volumes)) => picker.set_volumes(volumes),
             Ok(Prepare::Entries(entries)) => picker.set_entries(entries),
-            Err(e) => picker.fail(e.to_string()),
+            Err(e) => mkdir = picker.enter_failed(&e),
         }
     });
+    if let Some(root) = mkdir {
+        make_default_dir(ctx, root);
+    }
     ctx.request_repaint();
+}
+
+/// 在卷根下建默认目录，建好后再打开它。
+#[cfg(target_arch = "wasm32")]
+fn make_default_dir(ctx: &egui::Context, root: FinderPath) {
+    let ctx = ctx.clone();
+    spawn_local(async move {
+        match http::new_folder(&root, super::state::ASSETS_DIR).await {
+            Ok(()) => with(|s| {
+                if let Some(picker) = s.picker.as_mut() {
+                    picker.default_created(&root.adapter);
+                }
+            }),
+            Err(e) => with(|s| {
+                if let Some(picker) = s.picker.as_mut() {
+                    picker.fail(e.to_string());
+                }
+            }),
+        }
+        ctx.request_repaint();
+    });
 }
 
 /// 记录一次保存上传的真实结果。写入器接受字节时外壳就把文件标为已保存，所以失败的

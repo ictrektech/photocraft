@@ -14,6 +14,9 @@ use super::path::{self, FinderPath};
 /// 保存输入框在空的时候显示的浅色提示。它只是提示，不是名字的一部分。
 pub const FILE_NAME_HINT: &str = "untitled.psd";
 
+/// 选择器默认打开的目录名，在卷根下。
+pub const ASSETS_DIR: &str = "assets-psd";
+
 /// 对话框用来做什么。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -78,6 +81,8 @@ pub struct Picker {
     pending_delete: Option<Entry>,
     /// 正在改名的条目和新名字：右键"重命名"打开，确认或取消后清掉。
     renaming: Option<(Entry, String)>,
+    /// 默认目录还没打开过；打不开就建它，只建一次。
+    want_default: bool,
 }
 
 /// `path` 换成新名字后的路径：只换最后一段，目录和 scheme 不动。
@@ -121,6 +126,7 @@ impl Picker {
             filter: filter.into_iter().map(|e| e.trim_start_matches('.').to_ascii_lowercase()).collect(),
             pending_delete: None,
             renaming: None,
+            want_default: false,
         }
     }
 
@@ -188,19 +194,39 @@ impl Picker {
         matches!(self.phase, Phase::Browsing) && self.current.is_some()
     }
 
-    /// 卷到了。只有一个时直接进入它，这样单卷环境不用点一次。
+    /// 卷到了。只有一个时直接进入它的默认目录，这样单卷环境不用点一次。
     pub fn set_volumes(&mut self, volumes: Vec<Volume>) {
         let only = if let [only] = volumes.as_slice() { Some(only.adapter()) } else { None };
         self.volumes = volumes;
         match only {
-            Some(adapter) => self.enter_root(&adapter),
+            Some(adapter) => self.enter_default(&adapter),
             None => self.phase = Phase::Volumes,
         }
     }
 
-    /// 开始浏览 `adapter` 的根目录（唯一的卷，或用户点了它）。
-    pub fn enter_root(&mut self, adapter: &str) {
-        self.enter(&FinderPath::root(adapter).api_path());
+    /// 进入 `adapter` 的默认目录（[`ASSETS_DIR`]）。它不存在时由 [`Self::enter_failed`]
+    /// 记下要建它。
+    pub fn enter_default(&mut self, adapter: &str) {
+        let dir = FinderPath::root(adapter).child(ASSETS_DIR);
+        self.want_default = true;
+        self.enter(&dir);
+    }
+
+    /// 打开默认目录失败：路径不存在就在卷根下建它，返回要建的目录；其他失败照常报告。
+    pub fn enter_failed(&mut self, failure: &super::model::Failure) -> Option<FinderPath> {
+        let dir = self.current.clone()?;
+        if !self.want_default || !failure.is_not_found() {
+            self.fail(failure.to_string());
+            return None;
+        }
+        let root = FinderPath::root(&dir.adapter);
+        Some(root)
+    }
+
+    /// 默认目录建好了：再打开一次。
+    pub fn default_created(&mut self, adapter: &str) {
+        let dir = FinderPath::root(adapter).child(ASSETS_DIR);
+        self.enter(&dir);
     }
 
     /// 开始浏览 `dir`（Finder 路径）。会清空选择：它属于旧目录。
@@ -219,6 +245,7 @@ impl Picker {
 
     /// 列表到了。
     pub fn set_entries(&mut self, entries: Vec<Entry>) {
+        self.want_default = false;
         self.entries = entries;
         self.phase = Phase::Browsing;
     }
@@ -400,7 +427,7 @@ mod tests {
         let mut p = open_picker();
         p.set_volumes(vec![volume("vol1", "Space")]);
         assert_eq!(p.phase(), &Phase::Loading);
-        assert_eq!(p.current().map(|c| c.api_path()), Some("v_vol1://".to_string()));
+        assert_eq!(p.current().map(|c| c.api_path()), Some("v_vol1://assets-psd".to_string()));
     }
 
     #[test]
@@ -475,13 +502,58 @@ mod tests {
         assert_eq!(one.confirm(), Some(Choice::Open(vec![picked("v_vol1", "v_vol1://b.psd")])));
     }
 
+    /// 单卷时默认打开 `assets-psd`，不是卷根。
     #[test]
-    fn clicking_a_volume_enters_its_root() {
+    fn a_single_volume_opens_the_default_directory() {
         let mut p = open_picker();
         p.set_volumes(vec![volume("vol1", "Space")]);
-        p.enter_root("v_vol1");
+        assert_eq!(requested(&mut p), Some(Some("v_vol1://assets-psd".to_string())), "要的是默认目录");
+    }
+
+    /// 默认目录不存在时，在卷根下建它；其他失败照常报告。
+    #[test]
+    fn a_missing_default_directory_is_created_and_other_failures_are_reported() {
+        let mut p = open_picker();
+        p.set_volumes(vec![volume("vol1", "Space")]);
+        // 平台说路径不存在。
+        let missing = crate::vos::model::Failure { code: 10007, message: "ItemNotExist".into() };
+        assert_eq!(p.enter_failed(&missing).map(|d| d.api_path()), Some("v_vol1://".to_string()), "在卷根下建目录");
+        assert_eq!(p.phase(), &Phase::Loading, "建目录时还在等");
+
+        // 建好后再打开默认目录。
+        p.default_created("v_vol1");
+        assert_eq!(requested(&mut p), Some(Some("v_vol1://assets-psd".to_string())));
+        p.set_entries(vec![entry("file", "v_vol1://assets-psd/a.psd", "a.psd", "psd")]);
+        assert_eq!(p.phase(), &Phase::Browsing);
+
+        // 别的失败不进建目录流程。
+        let mut q = open_picker();
+        q.set_volumes(vec![volume("vol1", "Space")]);
+        let denied = crate::vos::model::Failure { code: 10046, message: "no permission".into() };
+        assert_eq!(q.enter_failed(&denied), None, "权限失败不建目录");
+        assert!(matches!(q.phase(), Phase::Error(_)), "照常报告");
+    }
+
+    /// 用户从默认目录向上回到卷根后，不会再被拉回去。
+    #[test]
+    fn going_up_from_the_default_directory_stays_at_the_root() {
+        let mut p = open_picker();
+        p.set_volumes(vec![volume("vol1", "Space")]);
+        p.set_entries(vec![entry("dir", "v_vol1://assets-psd", "assets-psd", "")]);
+        p.up();
+        assert_eq!(requested(&mut p), Some(Some("v_vol1://".to_string())), "回卷根");
+        p.set_entries(vec![entry("dir", "v_vol1://assets-psd", "assets-psd", ""), entry("file", "v_vol1://notes.psd", "notes.psd", "psd")]);
+        assert_eq!(p.current().map(|c| c.api_path()), Some("v_vol1://".to_string()), "留在卷根");
+        assert_eq!(p.visible_entries().count(), 2, "卷根的文件都看得到");
+    }
+
+    #[test]
+    fn clicking_a_volume_enters_its_default_directory() {
+        let mut p = open_picker();
+        p.set_volumes(vec![volume("vol1", "Space")]);
+        p.enter_default("v_vol1");
         assert_eq!(p.phase(), &Phase::Loading);
-        assert_eq!(p.current().map(|c| c.api_path()), Some("v_vol1://".to_string()));
+        assert_eq!(p.current().map(|c| c.api_path()), Some("v_vol1://assets-psd".to_string()));
     }
 
     #[test]
@@ -569,11 +641,11 @@ mod tests {
     fn a_save_name_cannot_escape_the_directory() {
         let mut p = Picker::new(Mode::Save, Vec::new(), Some("art.psd"));
         p.set_volumes(vec![crate::vos::model::Volume { uuid: "v1".into(), nick_name: None, name: "Space".into() }]);
-        p.enter_root("v1");
+        p.enter("v_v1://assets-psd");
         // `TextEdit` 直接写这个字符串，不做过滤。
         *p.file_name_mut() = "../../etc/passwd".into();
         let Some(crate::vos::state::Choice::Save(path)) = p.confirm() else { panic!("saving needs a name") };
-        assert_eq!(path, "v_v1://....etcpasswd", "分隔符不能把保存的位置换到别的目录");
+        assert_eq!(path, "v_v1://assets-psd/....etcpasswd", "分隔符不能把保存的位置换到别的目录");
     }
 
     #[test]
@@ -585,7 +657,7 @@ mod tests {
         assert_eq!(p.file_name_text(), "poster.psd");
         p.set_volumes(vec![volume("vol1", "Space")]);
         p.set_entries(Vec::new());
-        assert_eq!(p.confirm(), Some(Choice::Save("v_vol1://poster.psd".into())));
+        assert_eq!(p.confirm(), Some(Choice::Save("v_vol1://assets-psd/poster.psd".into())));
     }
 
     #[test]
@@ -603,7 +675,7 @@ mod tests {
         let mut p = Picker::new(Mode::Save, Vec::new(), Some("art.psd"));
         p.set_volumes(vec![volume("vol1", "Space")]);
         p.set_entries(Vec::new());
-        assert_eq!(p.confirm(), Some(Choice::Save("v_vol1://art.psd".into())));
+        assert_eq!(p.confirm(), Some(Choice::Save("v_vol1://assets-psd/art.psd".into())));
     }
 
     #[test]
@@ -652,7 +724,7 @@ mod tests {
         // 已完成的列表不能看起来像待处理的请求：那样会每帧重新要卷列表，在转圈和文件之间闪现。
         let mut p = open_picker();
         assert_eq!(frame(&mut p), Some(None), "the first frame asks for the volumes");
-        assert_eq!(frame(&mut p), Some(Some("v_vol1://".into())), "and then for the only volume's root");
+        assert_eq!(frame(&mut p), Some(Some("v_vol1://assets-psd".into())), "and then for the only volume's default directory");
         assert_eq!(p.phase(), &Phase::Browsing);
         for _ in 0..3 {
             assert_eq!(frame(&mut p), None, "nothing is left to ask for");
