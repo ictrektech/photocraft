@@ -167,6 +167,9 @@ async fn command_list_filters() {
     let blur = json_of(&call(&client, "command_list", json!({"filter": "blur"})).await);
     assert!(!blur.as_array().unwrap().is_empty() && blur.as_array().unwrap().len() < n_all);
     assert!(blur.as_array().unwrap().iter().all(|c| c["params"].is_string()));
+    // The Elliptical Marquee is a `select.rect` option, found by its keywords (#5060).
+    let marquee = json_of(&call(&client, "command_list", json!({"filter": "ellipse"})).await);
+    assert!(marquee.as_array().unwrap().iter().any(|c| c["id"] == "select.rect"), "{marquee}");
     let enabled = json_of(&call(&client, "command_list", json!({"enabled_only": true})).await);
     assert!(enabled.as_array().unwrap().iter().any(|c| c["id"] == "file.new"));
     assert!(!enabled.as_array().unwrap().iter().any(|c| c["id"] == "layer.new.layer"), "needs a document");
@@ -1236,11 +1239,16 @@ async fn convention_resources_are_live_json() {
     assert_eq!(read("photocraft://document").await["width"], 8);
     // Edit › Purge › All is enabled while the process-wide effect, mask and stack caches hold
     // anything, and the other tests in this binary fill and purge those caches concurrently, so
-    // its `enabled` flag can flip between the two reads. Every other field must match exactly.
+    // its `enabled` flag and paired `disabledReason` can flip between the two reads. Validate
+    // each availability pair; every stable field and every other command must match exactly.
     let stable = |mut v: Value| {
         for c in v.as_array_mut().into_iter().flatten() {
             if c["id"] == "edit.purge.all" {
-                c.as_object_mut().map(|o| o.remove("enabled"));
+                let reason = if c["enabled"].as_bool().unwrap() { Value::Null } else { json!("nothing to purge") };
+                assert_eq!(c["disabledReason"], reason, "purge availability stays internally consistent");
+                let command = c.as_object_mut().unwrap();
+                command.remove("enabled");
+                command.remove("disabledReason");
             }
         }
         v

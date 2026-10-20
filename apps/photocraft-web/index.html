@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
   <title>PhotoCraft</title>
   <!-- Trunk selects the Cargo profile by build mode and runs wasm-opt only for release builds. -->
-  <link data-trunk rel="rust" data-bin="photocraft-web" data-cargo-profile-release="wasm-release" data-cargo-profile-dev="wasm-dev" data-cargo-features="heif" data-wasm-opt="z" data-weak-refs />
+  <link data-trunk rel="rust" data-bin="photocraft-web" data-cargo-profile-release="wasm-release" data-cargo-profile-dev="wasm-dev" data-cargo-features="heif" data-wasm-opt="z" data-wasm-opt-params="--converge" data-weak-refs />
   <style>
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #262626; }
     #photocraft_canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }

@@ -136,6 +136,8 @@ fn stroke(s: &mut Session, p: &Value) -> Result<Value> {
     // Whole pixels, rounded up, as in Photoshop (0.5 px strokes 1 px).
     let width = p.get("width").and_then(Value::as_f64).filter(|w| w.is_finite()).unwrap_or(1.0).clamp(1.0, 250.0).ceil() as usize;
     let color = color_param(p, "color", s.tools.foreground);
+    // A colour picked as CMYK strokes a CMYK document with the picked inks (#4196).
+    let picked = s.tools.picked_cmyk([color[0], color[1], color[2]]);
     let mode = match p.get("mode") {
         None | Some(Value::Null) => photocraft_color::BlendMode::Normal,
         Some(Value::String(m)) => crate::commands::blend_from_str(m)
@@ -214,7 +216,7 @@ fn stroke(s: &mut Session, p: &Value) -> Result<Value> {
         let surf = crate::commands::paint_surface(doc, id, &Value::Null)?;
         let area = band.content_bounds().intersect(&canvas);
         if !area.is_empty() {
-            crate::fill_cmds::blend_color_mask(surf, area, color, &band, mode, opacity, preserve || lock)?;
+            crate::fill_cmds::blend_color_mask(surf, area, color, picked, &band, mode, opacity, preserve || lock)?;
             surf.prune();
         }
         Ok(())
@@ -435,11 +437,20 @@ pub fn reveal_all_bounds(doc: &Document) -> Rect {
 
 // ---------- layers ----------
 
-fn layer_from_background(s: &mut Session) -> Result<Value> {
+fn layer_from_background(s: &mut Session, p: &Value) -> Result<Value> {
+    let d = s.active().ok_or(EngineError::NoDocument)?;
+    if d.doc.background().is_none() && p.get("ifPresent").and_then(Value::as_bool) == Some(true) {
+        return Ok(json!({"layer": null}));
+    }
+    // `select: false`: the targeted layer stays targeted, as when a Photoshop action's `set`
+    // names the Background while another layer is selected.
+    let select = p.get("select").and_then(Value::as_bool).unwrap_or(true);
     let id = s.edit("Layer From Background", |doc, active| {
         let l = doc.background_mut().ok_or(EngineError::Other("the document has no Background layer".into()))?;
         unlock_background(l);
-        *active = Some(l.id);
+        if select || active.is_none() {
+            *active = Some(l.id);
+        }
         Ok(l.id)
     })?;
     Ok(json!({"layer": id.0}))
@@ -511,11 +522,16 @@ fn delete_where(s: &mut Session, label: &str, pred: fn(&Layer) -> bool) -> Resul
             n
         }
         let backup = doc.layers.clone();
+        // The clip groups of the doomed layers, read before they go (clip_group rule 3: layers
+        // clipped to a deleted base are released).
+        let doomed: Vec<LayerId> = doc.walk().into_iter().filter(|(_, _, l)| pred(l)).map(|(_, _, l)| l.id).collect();
+        let before = crate::clip_group::Before::read(doc, &doomed);
         let n = rec(&mut doc.layers, pred);
         if doc.layers.is_empty() {
             doc.layers = backup;
             return Err(EngineError::Other("a document must keep at least one layer".into()));
         }
+        crate::clip_group::settle(doc, &[], &before, false);
         if active.is_none_or(|id| doc.layer(id).is_none()) {
             *active = doc.top_layer();
         }
@@ -856,11 +872,28 @@ pub fn specs() -> Vec<CommandSpec> {
             s.execute("image.crop", json!({"x": all.x0, "y": all.y0, "width": all.width(), "height": all.height(), "deleteCroppedPixels": false}))?;
             Ok(json!({"changed": true}))
         }),
-        spec!("layer.new.layerFromBackground", "Layer From Background…", &["Layer", "New"], None, "{}", has_background, |s, _| layer_from_background(s)),
+        spec!(
+            "layer.new.layerFromBackground",
+            "Layer From Background…",
+            &["Layer", "New"],
+            None,
+            r##"{"ifPresent":bool=false (true: a document without a Background is left as it is, as a Photoshop action's step needs on an image that opened as a normal layer),"select":bool=true (false: the targeted layer stays targeted)}"##,
+            has_background,
+            layer_from_background
+        ),
         spec!("layer.layerStyle.copyLayerStyle", "Copy Layer Style", &["Layer", "Layer Style"], None, r##"{"layer":id?}"##, has_layer, |s, p| {
             let id = layer_param(s, p)?;
-            let l = s.active().and_then(|d| d.doc.layer(id)).ok_or(EngineError::NoLayer(id))?;
-            let style = (l.effects.clone(), l.blend, l.fill_opacity, l.advanced);
+            let d = s.active().ok_or(EngineError::NoDocument)?;
+            let l = d.doc.layer(id).ok_or(EngineError::NoLayer(id))?;
+            let style = crate::CopiedStyle {
+                effects: l.effects.clone(),
+                blend: l.blend,
+                fill: l.fill_opacity,
+                advanced: l.advanced,
+                blend_if: l.blend_if.clone(),
+                excluded_channels: l.excluded_channels,
+                mode: d.doc.mode,
+            };
             s.style_clipboard = Some(style);
             Ok(Value::Null)
         }),
@@ -876,17 +909,38 @@ pub fn specs() -> Vec<CommandSpec> {
             },
             |s, p| {
                 let ids = style_targets(s, p, |_| true)?;
-                let (mut fx, blend, fill, advanced) = s.style_clipboard.clone().ok_or(EngineError::Other("no layer style has been copied".into()))?;
+                let style = s.style_clipboard.clone().ok_or(EngineError::Other("no layer style has been copied".into()))?;
+                let mut fx = style.effects;
                 s.edit("Paste Layer Style", |doc, _| {
                     // A style copied from a document in another mode takes this one's colours.
                     let mode = doc.mode;
                     fx.items = std::mem::take(&mut fx.items).into_iter().map(|e| e.in_mode(mode)).collect();
+                    // Blend If's Gray range carries over to any mode; its channel ranges and the
+                    // channel restrictions only to the mode they were set in.
+                    let same_mode = style.mode == mode;
+                    let blend_if = if same_mode {
+                        style.blend_if.clone()
+                    } else {
+                        // Through `set`, which keeps the normalised form (no trailing full
+                        // entries), so a full Gray range pastes as the default.
+                        let mut gray = photocraft_doc::BlendIf::default();
+                        gray.set(0, style.blend_if.get(0));
+                        gray
+                    };
                     for id in ids {
                         let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
                         l.effects = fx.clone();
-                        l.blend = blend;
-                        l.fill_opacity = fill;
-                        l.advanced = advanced;
+                        // Pass Through is a group's mode: a group's style pastes onto other layers as
+                        // Normal, as a merged group's Pass Through becomes Normal.
+                        l.blend = if style.blend == photocraft_color::BlendMode::PassThrough && !l.is_group() {
+                            photocraft_color::BlendMode::Normal
+                        } else {
+                            style.blend
+                        };
+                        l.fill_opacity = style.fill;
+                        l.advanced = style.advanced;
+                        l.blend_if = blend_if.clone();
+                        l.excluded_channels = if same_mode { style.excluded_channels } else { 0 };
                     }
                     Ok(())
                 })?;
@@ -1530,7 +1584,7 @@ mod tests {
         // Layer 1 is already the only visible layer: ⌥-clicking it shows everything.
         assert_eq!(s.execute("layer.showOnly", json!({})).unwrap()["shownAlone"], false);
         assert!(doc(&s).layers.iter().all(|l| l.visible));
-        assert!(s.execute("layer.showOnly", json!({"layer": 9999})).is_err());
+        assert!(s.execute("layer.showOnly", json!({"layer": u64::MAX})).is_err());
         assert!(Session::new().execute("layer.showOnly", json!({})).is_err());
     }
 
@@ -1605,7 +1659,7 @@ mod tests {
         let bg_locks = doc(&s).layer(bg).unwrap().locks;
         assert!(s.execute("layer.toggleLockTransparency", json!({"layer": bg.0})).is_err());
         assert_eq!(doc(&s).layer(bg).unwrap().locks, bg_locks, "the Background is left alone");
-        assert!(s.execute("layer.toggleLockTransparency", json!({"layer": 999_999})).is_err());
+        assert!(s.execute("layer.toggleLockTransparency", json!({"layer": u64::MAX})).is_err());
     }
 
     #[test]
