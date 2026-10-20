@@ -5,6 +5,7 @@
 #   ./scripts/verify-scope.sh            # check, non-zero when a file is out of scope
 #   ./scripts/verify-scope.sh --list     # just print what differs, always exit 0
 #   ./scripts/verify-scope.sh --base v0.8.2
+#   ./scripts/verify-scope.sh --staged   # check the index instead of HEAD (pre-commit hook)
 #
 # Why it matters: mirror tracks upstream untouched and main carries the VOS packaging, so
 # `git rebase` stays a five-minute job. A change to a core file that this script rejects is still
@@ -48,12 +49,16 @@ log() { echo "[scope] $*"; }
 
 base=""
 list_only=0
+staged=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --base) base="${2:-}"; shift 2 ;;
     --list) list_only=1; shift ;;
+    --staged) staged=1; shift ;;
     -h|--help)
-      grep '^#' "${BASH_SOURCE[0]}" | sed -n '2,9p' | sed 's/^# \{0,1\}//'
+      # The usage block is the run of "#   ./scripts/..." lines in the header; print that instead of
+      # a fixed line range, which silently drops a new flag when one is added.
+      grep -E '^#   \./scripts/' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
@@ -91,9 +96,16 @@ if ! git merge-base --is-ancestor "${base}" HEAD; then
 fi
 log "base ${base} ($(git rev-parse --short "$base"))"
 
-changed="$(git diff --name-only "${base}" HEAD)"
+if (( staged )); then
+  # A pre-commit hook runs before the commit exists, so HEAD does not contain the files it has to
+  # judge. The index does: that is what the commit is about to hold. Files that are neither staged
+  # nor committed are not judged here, because the commit will not contain them either.
+  changed="$({ git diff --cached --name-only --diff-filter=ACMRD; git diff --name-only "${base}" HEAD; } | sort -u)"
+else
+  changed="$(git diff --name-only "${base}" HEAD)"
+fi
 if [[ -z "$changed" ]]; then
-  log "HEAD has no changes against the base"
+  log "no changes against the base"
   exit 0
 fi
 

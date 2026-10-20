@@ -45,15 +45,10 @@ jobs:
 
       # Upstream's own workflows ride in with every sync rebase and would run the fork's full
       # heavy CI on push. The prune commit at the head of the VOS series deletes them; this
-      # catches a workflow that came back (upstream added one rerere has not seen yet).
+      # catches a workflow that came back (upstream added one rerere has not seen yet). The same
+      # script runs as a pre-commit hook, so the rule has one implementation.
       - name: No foreign workflows
-        run: |
-          keep='vos-release.yml|vos-ci.yml'
-          if ls .github/workflows/*.yml | grep -Ev "($keep)$" | grep .; then
-            echo "::error::upstream workflows came back with the sync; delete them (prune commit)" >&2
-            exit 1
-          fi
-          echo "only VOS workflows present"
+        run: bash ictrek.app/scripts/pre-commit-workflows.sh
 
       - name: Shellcheck the packaging scripts
         run: |

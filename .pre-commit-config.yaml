@@ -1,8 +1,8 @@
 # Pre-commit checks for the VOS fork. Keep this list tiny: it must finish in seconds so people
-# actually keep it enabled. Heavy checks (web build, wasm size gate, scope guard) run in vos-ci
-# on every push; this only catches the mechanical errors before they reach CI.
+# actually keep it enabled. Heavy checks (web build, wasm size gate) run in vos-ci on every push;
+# this only catches the mechanical errors before they reach CI.
 #
-# Install:  pip install pre-commit && pre-commit install
+# Install:  pip install pre-commit && pre-commit install && pre-commit install --hook-type pre-push
 # Run all:  pre-commit run --all-files
 
 repos:
@@ -19,10 +19,12 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
-      # Workflow YAML is the fork's own CI; a syntax slip breaks every push until fixed.
+      # Workflow YAML is the fork's own CI; a syntax slip breaks every push until fixed. docker/
+      # compose files and packaging/ manifests are read by scripts at release time, where a decode
+      # error surfaces only after the images are built.
       - id: check-yaml
-        name: yaml (workflows, ictrek.app)
-        files: ^(\.github/workflows|ictrek\.app)/.*\.ya?ml$
+        name: yaml (workflows, ictrek.app, docker, packaging)
+        files: ^(\.github/workflows|ictrek\.app|docker|packaging)/.*\.ya?ml$
       # release drives packaging scripts from repo root; CRLF in bash breaks them on Linux.
       - id: end-of-file-fixer
         files: ^ictrek\.app/
@@ -32,3 +34,35 @@ repos:
       # and corpus files must never be committed.
       - id: check-added-large-files
         args: [--maxkb=1024]
+
+  - repo: local
+    hooks:
+      # The guard CI runs on every push and before every release. A change to an upstream file
+      # outside the whitelist fails the whole run, so catching it here saves a round trip.
+      # Skips itself when the upstream base is not fetched locally.
+      - id: vos-scope
+        name: VOS scope guard (no upstream file changed)
+        entry: bash ictrek.app/scripts/pre-commit-scope.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # Upstream's workflows ride in with every sync rebase; the prune commit deletes them, and
+      # this catches one that came back before CI does. It also fails when the directory is missing
+      # or empty, since then the fork's own CI would never run.
+      - id: vos-no-foreign-workflows
+        name: no upstream workflows came back
+        entry: bash ictrek.app/scripts/pre-commit-workflows.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # update_version.sh commits VERSION and then tags it; the release workflow refuses a tag
+      # whose tree disagrees, and a mismatch is easier to see here than in a failed run.
+      - id: vos-version-agrees-with-tag
+        name: ictrek.app/VERSION agrees with the tag
+        entry: bash ictrek.app/scripts/pre-push-version.sh
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
