@@ -233,7 +233,16 @@ pub async fn download(adapter: &str, path: &str) -> Result<Vec<u8>, Failure> {
         return Err(too_big);
     }
     let bytes = finish(Ok(blob.array_buffer())).await.map_err(|e| broke(JsValue::from_str(&e)))?;
-    Ok(js_sys::Uint8Array::new(&bytes).to_vec())
+    let bytes = js_sys::Uint8Array::new(&bytes).to_vec();
+    // 平台拒绝请求时回的是 HTTP 200 + JSON 信封，不是文件正文。信封以 '{' 开头，所以先看
+    // 第一个字节再解析。
+    if bytes.first() == Some(&b'{')
+        && let Ok(text) = std::str::from_utf8(&bytes)
+        && let Some(failure) = model::failure(text)
+    {
+        return Err(failure);
+    }
+    Ok(bytes)
 }
 
 /// 平台为 `path` 列出的大小，前提是它的目录能列出并且里面有它。
