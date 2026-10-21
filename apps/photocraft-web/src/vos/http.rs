@@ -210,23 +210,38 @@ pub async fn download(adapter: &str, path: &str) -> Result<Vec<u8>, Failure> {
     {
         return Err(too_big);
     }
+    fetch_bytes(&url).await
+}
+
+/// 取一个同源 URL 的字节；目标由 [`super::open::validate`] 限定在本平台内。
+pub(super) async fn download_url(url: &str) -> Result<Vec<u8>, Failure> {
+    fetch_bytes(url).await
+}
+
+/// 带应用访问令牌 GET `url`；平台拒绝令牌（`10001`）时换新令牌重试一次。
+async fn fetch_bytes(url: &str) -> Result<Vec<u8>, Failure> {
     // 正文以 Blob 到达，然后整体读出：分块读取需要 `ReadableStream` 绑定，而真正起约束作用
-    // 的是 index 报出的大小。
+    // 的是 Finder 的 index 或这里读到的 Blob 大小。
     let fetch = || async {
         let token = token().await?;
-        let response = send(&authorized("GET", &token)?, &url).await?;
+        let response = send(&authorized("GET", &token)?, url).await?;
         if !response.ok() {
             return Err(http_error(&response).await);
         }
-        let blob = response.blob().map_err(broke)?;
-        let blob = finish(Ok(blob)).await.map_err(|e| broke(JsValue::from_str(&e)))?;
-        blob.dyn_into().map_err(|_| broke(JsValue::from_str("not a Blob")))
+        response_bytes(response).await
     };
     // 和 `reply` 一样重试，也包括 `send` 报告的无正文 SSE `error` 事件。
-    let blob: web_sys::Blob = match fetch().await {
-        Err(e) if refused_error(&e.to_string()) => fetch().await.map_err(|_| e)?,
-        answer => answer?,
-    };
+    match fetch().await {
+        Err(e) if refused_error(&e.to_string()) => fetch().await.map_err(|_| e),
+        answer => answer,
+    }
+}
+
+/// 一个成功响应的正文，按体积上限与平台错误信封检查。
+async fn response_bytes(response: web_sys::Response) -> Result<Vec<u8>, Failure> {
+    let blob = response.blob().map_err(broke)?;
+    let blob: web_sys::Blob =
+        finish(Ok(blob)).await.map_err(|e| broke(JsValue::from_str(&e)))?.dyn_into().map_err(|_| broke(JsValue::from_str("not a Blob")))?;
     // Blob 已经装着整个正文，此时拦下超大文件省不了内存；它只是不让下一步（在 wasm 内存里
     // 再复制一份完整数据）发生。
     if let Some(too_big) = too_big(blob.size() as u64) {

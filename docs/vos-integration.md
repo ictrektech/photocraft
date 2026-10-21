@@ -379,6 +379,7 @@ only core change this phase makes.
 | `vos.rs` | Module layout and the `cfg` gates (documented there) |
 | `vos/path.rs` | The `<adapter>://<dir>/<name>` grammar, pure and host-tested |
 | `vos/model.rs` | Finder reply decoding and the error-code wording, pure and host-tested |
+| `vos/open.rs` | The `?open=` handoff: query parsing and same-origin validation, pure and host-tested |
 | `vos/state.rs` | The picker's state machine, pure and host-tested |
 | `vos/crypto.rs` | base64url + SHA-256 in Rust (the PKCE digest), pure and host-tested |
 | `vos/bridge.rs` | `window.vos_platform` detection, PKCE, per-tab token cache |
@@ -411,6 +412,33 @@ a local `trunk serve` or a directly-opened page keeps the browser picker and the
 **Saving.** A Finder path becomes the document's path, so Ctrl+S writes back to the same file
 (`saves_in_place` accepts `.psd`/`.psb`/`.pcraft`/`.ora`). Uploads send
 `conflict_strategy=overwrite`, because the platform's default rejects an existing name.
+
+### Handoff from another app (`?open=`, `vos/open.rs`)
+
+Another VOS app opens a file in PhotoCraft with
+`/app/com.ictrek.photocraft/?open=<path>&name=<display name>&source=<app id>` (the contract is
+`plan/image-studio-integration.md` §2; image-studio's gallery uses it). `vos/open.rs` parses and
+validates it, `vos/install.rs` fetches it once the app exists, then:
+
+- a **same-origin app path** (`/api/<app>/…` or `/app/<app>/…`) is fetched with the app's own
+  access token and opened through `open_bytes`, so the source stays only a source: Ctrl+S goes to
+  Save As (browser download, or the Finder picker), never back to the URL;
+- a **Finder file path** (`v_…://…`) goes through the usual Finder download and `open_file`, so
+  Ctrl+S writes back to it. A volume directory is refused.
+
+Only root-relative paths are accepted, which makes them same-origin by construction, and the path
+must sit in an app namespace (a platform endpoint such as `/api/v1/…` is refused). Full URLs,
+other schemes, `..` (including percent-encoded and multiply-encoded), backslashes and control
+characters are refused. Even so, the handoff performs an authenticated GET: a crafted link can
+make the browser call any *app* endpoint in the user's name, so app APIs must keep GET free of
+side effects. No token is ever put in the URL: PhotoCraft authenticates with its own
+`window.vos_platform` token, and the source app's API accepts it because it validates the token's
+user, not its audience. The first open in a fresh tab has no cached token (it lives in
+`sessionStorage`), so it always runs the platform's sign-in fastpath. After the file opens, only
+`open`, `name` and `source` are removed from the URL; other parameters such as `?cpu` and `?webgl`
+survive (a failed handoff keeps everything, so a reload retries). The app whose id is in `source`
+is not called back yet: saving a new version into image-studio's gallery is the next step, see
+"Not yet built".
 
 ### Where a document lands, and the one row the picker needs
 
@@ -495,6 +523,9 @@ app-private data (autosave, thumbnails) would then go to `${VOS_APP_STORAGE_PATH
 
 ### Not yet built
 
+- **Saving a new version back into the app that handed the file over.** `?open=` opens it and
+  Ctrl+S saves to VOS (or downloads), but nothing posts the result to image-studio's gallery
+  (`POST /api/v1/outputs/import`, described in `plan/image-studio-integration.md` §4).
 - **Autosave / crash recovery.** `Services::autosave`/`recover` are still unset on the web, so a
   refresh loses an edited document unless it was saved to VOS.
 - **New Folder, rename, delete, shares, public directories.** The Finder API has them; the picker

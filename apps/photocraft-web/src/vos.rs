@@ -15,6 +15,8 @@ pub mod crypto;
 #[cfg(any(target_arch = "wasm32", test))]
 pub mod model;
 #[cfg(any(target_arch = "wasm32", test))]
+pub mod open;
+#[cfg(any(target_arch = "wasm32", test))]
 pub mod path;
 #[cfg(any(target_arch = "wasm32", test))]
 pub mod recent;

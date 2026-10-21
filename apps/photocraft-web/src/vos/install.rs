@@ -18,6 +18,7 @@ use photocraft_ui_egui::{FileDialogAnswer, FileDialogRequest, PhotocraftApp, Pla
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::spawn_local;
 
+use super::open;
 #[cfg(target_arch = "wasm32")]
 use super::path::{self, FinderPath};
 #[cfg(any(target_arch = "wasm32", test))]
@@ -56,6 +57,10 @@ struct State {
     forgotten: Vec<String>,
     /// 首页请求打开平台自己的浏览器（由持有 app 的 [`ui`] 执行）。
     browse: bool,
+    /// 另一个应用交接过来、还没取回的文件（`?open=`，见 [`open`]）。
+    launch: Option<open::Launch>,
+    /// 已取回的交接文件：Finder 路径（URL 来源为 `None`）、标题、字节。
+    launched: Vec<(Option<String>, String, Vec<u8>)>,
 }
 
 thread_local! {
@@ -83,6 +88,22 @@ pub fn install(services: &mut Services) {
     // 首页的列表通过 localStorage 在刷新后保留。
     let stored = web_sys::window().and_then(|w| w.local_storage().ok().flatten()).and_then(|s| s.get_item(home::RECENT_KEY).ok().flatten());
     with(|s| s.recent = Recent::load(stored.as_deref()));
+    // 另一个应用交接过来的文件（`?open=`，见 `docs/vos-integration.md` › Handoff）。
+    let search = web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default();
+    match open::parse(&search) {
+        // 取字节与打开在 `ui` 里做，成功后在那里清掉查询串。
+        Ok(Some(launch)) => {
+            log::info!("photocraft-web: opening {} handed over by {}", launch.url, launch.source.as_deref().unwrap_or("another app"));
+            with(|s| s.launch = Some(launch));
+        }
+        Ok(None) => {}
+        Err(e) => {
+            log::warn!("photocraft-web: ignored ?open=: {e}");
+            with(|s| s.errors.push(e));
+            // 坏链接同样清掉。
+            clear_query();
+        }
+    }
     services.file_dialog = Some(Box::new(|request, _parent, reply| show_dialog(request, reply)));
     services.platform_files = Some(Box::new(|| with(|s| home::listing(s.recent.paths()))));
     services.platform_open = Some(Box::new(|request| match request {
@@ -122,6 +143,21 @@ pub fn install(services: &mut Services) {
         stage(path, bytes);
         Ok(())
     }));
+}
+
+/// 去掉交接参数，保留其它查询参数、路径与片段。
+#[cfg(target_arch = "wasm32")]
+fn clear_query() {
+    let Some(window) = web_sys::window() else { return };
+    let location = window.location();
+    let Ok(path) = location.pathname() else { return };
+    let hash = location.hash().unwrap_or_default();
+    let rest = open::without_handoff(&location.search().unwrap_or_default());
+    let query = if rest.is_empty() { String::new() } else { format!("?{rest}") };
+    let Ok(history) = window.history() else { return };
+    if let Err(e) = history.replace_state_with_url(&wasm_bindgen::JsValue::UNDEFINED, "", Some(&format!("{path}{query}{hash}"))) {
+        log::warn!("photocraft-web: could not clear the ?open= query: {}", bridge::describe(&e));
+    }
 }
 
 /// 暂存一次保存的字节，直到它的上传开始。
@@ -226,6 +262,39 @@ pub fn ui(app: &mut PhotocraftApp, ctx: &egui::Context) {
         && let Err(e) = app.open_dialog_file()
     {
         report(app, e);
+    }
+    // 交接过来的文件：取回字节后留到下一帧打开。
+    if let Some(launch) = with(|s| s.launch.take()) {
+        let ctx = ctx.clone();
+        spawn_local(async move {
+            let adapter = FinderPath::split_file(&launch.url).map(|(dir, _)| dir.adapter);
+            let (path, result) = match adapter {
+                Some(adapter) => (Some(launch.url.clone()), http::download(&adapter, &launch.url).await),
+                None => (None, http::download_url(&launch.url).await),
+            };
+            match result {
+                Ok(bytes) => with(|s| s.launched.push((path, launch.name, bytes))),
+                Err(e) => with(|s| s.errors.push(format!("{}: {e}", launch.name))),
+            }
+            ctx.request_repaint();
+        });
+    }
+    for (path, name, bytes) in with(|s| std::mem::take(&mut s.launched)) {
+        let opened = match &path {
+            // Finder 路径成为文档路径：Ctrl+S 写回同一个文件。
+            Some(path) => app.open_file(path, &bytes).map(|_| ()),
+            // URL 只是来源，不是保存目标：Ctrl+S 走另存（浏览器下载或 Finder 选择器）。
+            None => app.open_bytes(&name, &bytes).map(|_| ()),
+        };
+        if let Err(e) = opened {
+            app.open_failed(&name, &e);
+        } else {
+            // 只消费一次：打开成功后清掉查询串。
+            clear_query();
+        }
+        if let Some(path) = path {
+            app.remove_recent(&path);
+        }
     }
     // 首页打开的文件。传入完整的 Finder 路径，文件就记住它（Ctrl+S 写回 VOS），而标签页里只
     // 显示文件名。
