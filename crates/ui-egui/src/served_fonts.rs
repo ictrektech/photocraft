@@ -17,7 +17,9 @@ static PENDING: Mutex<Vec<(DocId, LayerId)>> = Mutex::new(Vec::new());
 /// fallback, e.g. Arabic set in Inter), and show our own layout. A PSD layer still
 /// showing Photoshop's pixels (not edited yet) keeps them, as it does when its font is installed
 /// from the start. Call it every frame: it also retries the layers of a document that was busy.
-pub fn install(app: &mut PhotocraftApp, delivered: Vec<(String, Vec<u8>)>) {
+///
+/// Each file also goes into the UI's font stack ([`crate::cjk_fonts::add_served_font`]).
+pub fn install(app: &mut PhotocraftApp, ctx: &egui::Context, delivered: Vec<(String, Vec<u8>)>) {
     let mut layers = std::mem::take(&mut *PENDING.lock().unwrap_or_else(PoisonError::into_inner));
     if !delivered.is_empty() {
         let families: Vec<String> = delivered.iter().map(|(f, _)| f.clone()).collect();
@@ -36,6 +38,8 @@ pub fn install(app: &mut PhotocraftApp, delivered: Vec<(String, Vec<u8>)>) {
         }
         let mut eng = photocraft_text::shared().lock().unwrap_or_else(PoisonError::into_inner);
         for (family, bytes) in delivered {
+            // The UI stack and the type engine each own their copy: both take the bytes whole.
+            crate::cjk_fonts::add_served_font(ctx, family.clone(), bytes.clone());
             let added = eng.fonts.register_font_data(bytes);
             if !added.contains(&family) {
                 log::warn!("a served font file listed as {family:?} registers {added:?}; the family in fonts/manifest.txt must be the font's own");
@@ -46,6 +50,13 @@ pub fn install(app: &mut PhotocraftApp, delivered: Vec<(String, Vec<u8>)>) {
         let busy = app.session.refresh_type_layers(&layers);
         PENDING.lock().unwrap_or_else(PoisonError::into_inner).extend(busy);
     }
+}
+
+/// Puts a delivered font into the UI's stack; [`install`] only sees the files of the frame they
+/// arrived in, so the shell re-adds the rest from the bytes it kept. A face already in the stack is
+/// left alone.
+pub fn reinstall_in_ui(ctx: &egui::Context, family: String, bytes: Vec<u8>) {
+    crate::cjk_fonts::add_served_font(ctx, family, bytes);
 }
 
 /// Should the layer be redrawn when `families` arrive: it uses one of them, or its text is in a

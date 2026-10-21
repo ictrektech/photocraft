@@ -162,6 +162,25 @@ if ! docker image inspect "${TOOLCHAIN_IMAGE}" >/dev/null 2>&1 \
         docker/build_toolchain.sh"
 fi
 
+# Copies the craft-fonts `fonts/` folder into the build context, where docker/Dockerfile.vos hands
+# it to scripts/vos-fonts.sh. The copy is a real directory, since Docker leaves a symlinked one out
+# of the context. The path is git-ignored.
+CRAFT_FONTS_DEFAULT="${ROOT_DIR}/../craft-fonts"
+CRAFT_FONTS_SRC="${CRAFT_FONTS_DIR:-${CRAFT_FONTS_DEFAULT}}"
+FONTS_DIR="${ROOT_DIR}/craft-fonts"
+
+# Leaves the build context as it was found, on failure too.
+rm -rf "${FONTS_DIR}"
+trap 'rm -rf "${FONTS_DIR}"' EXIT
+
+[[ -f "${CRAFT_FONTS_SRC}/fonts/manifest.txt" ]] || die "no craft-fonts checkout at ${CRAFT_FONTS_SRC}:
+  the image would serve no CJK fonts, so every Chinese, Japanese and Korean label renders as an empty box.
+  Clone it next to this repository (or point CRAFT_FONTS_DIR at an existing checkout):
+      git clone https://github.com/storytold/craft-fonts ${CRAFT_FONTS_DEFAULT}"
+mkdir -p "${FONTS_DIR}"
+cp -r "${CRAFT_FONTS_SRC}/fonts" "${FONTS_DIR}/" || die "copying ${CRAFT_FONTS_SRC}/fonts failed"
+log "fonts from ${CRAFT_FONTS_SRC} ($(du -sh "${FONTS_DIR}/fonts" | cut -f1))"
+
 build_args=(
   --file "${DOCKERFILE}"
   --build-arg "TOOLCHAIN_IMAGE=${TOOLCHAIN_IMAGE}"

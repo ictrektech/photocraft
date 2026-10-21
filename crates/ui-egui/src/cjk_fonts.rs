@@ -369,8 +369,36 @@ fn add_to_all_families(ctx: &egui::Context, name: String, mut data: FontData) {
     ctx.add_font(FontInsert { name, data, families });
 }
 
+/// Adds a font the host served (the web build's `fonts/manifest.txt`) as the lowest-priority face
+/// of every UI family, the slot the lazy loader puts a system fallback in.
+/// Returns whether egui holds the font afterwards.
+pub fn add_served_font(ctx: &egui::Context, name: String, bytes: Vec<u8>) -> bool {
+    if name.trim().is_empty() || bytes.is_empty() {
+        return false;
+    }
+    // A face counts as present only while it is both stored and referenced by a family.
+    let (has_face, in_families) = ctx.fonts(|f| {
+        let d = f.definitions();
+        (d.font_data.contains_key(&name), d.families.values().any(|s| s.contains(&name)))
+    });
+    if has_face && in_families {
+        return true;
+    }
+    add_to_all_families(ctx, name, FontData::from_owned(bytes));
+    true
+}
+
 /// The egui plugin that watches drawn text and loads fallback fonts on demand.
 pub struct CjkFontPlugin(pub CjkFallback);
+
+/// Asks the host for the served fallback of the script the UI drew but could not cover: the web
+/// shell fetches what [`photocraft_text::served::take_requests`] returns and calls
+/// [`add_served_font`] with it.
+fn request_served_for_missing(ctx: &egui::Context, output: &egui::FullOutput, fallback: &CjkFallback) {
+    let Some(c) = missing_char(ctx, &output.shapes, fallback) else { return };
+    let mut buf = [0u8; 4];
+    photocraft_text::served::request_for_text(c.encode_utf8(&mut buf));
+}
 
 impl egui::Plugin for CjkFontPlugin {
     fn debug_name(&self) -> &'static str {
@@ -382,6 +410,8 @@ impl egui::Plugin for CjkFontPlugin {
             ctx.request_repaint();
             return;
         }
+        // A character the UI drew without a face asks the host for that script's served font.
+        request_served_for_missing(ctx, output, &self.0);
         if self.0.exhausted() && self.0.scripts_exhausted() {
             return;
         }
@@ -427,6 +457,52 @@ pub fn install_with(ctx: &egui::Context, sources: Sources) {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    /// A served font is stored once and referenced last by every UI family.
+    #[test]
+    fn a_served_font_joins_every_ui_family_at_the_lowest_priority() {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
+        let name = "test-served-cjk".to_string();
+        assert!(!add_served_font(&ctx, String::new(), vec![1, 2, 3]), "an empty family name is refused");
+        assert!(!add_served_font(&ctx, name.clone(), Vec::new()), "an empty file is refused");
+        assert!(add_served_font(&ctx, name.clone(), photocraft_text::fonts::INTER_REGULAR.to_vec()));
+        ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
+        let fonts = ctx.fonts(|f| f.definitions().clone());
+        assert!(fonts.font_data.contains_key(&name), "egui holds the served face");
+        for stack in fonts.families.values() {
+            assert_eq!(stack.iter().filter(|n| *n == &name).count(), 1, "added once to every family");
+            assert_eq!(stack.last(), Some(&name), "served face stays below the bundled ones");
+        }
+        assert!(add_served_font(&ctx, name.clone(), photocraft_text::fonts::INTER_REGULAR.to_vec()), "a second delivery is harmless");
+        ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
+        let again = ctx.fonts(|f| f.definitions().families.values().map(|s| s.iter().filter(|n| **n == name).count()).sum::<usize>());
+        assert_eq!(again, fonts.families.len(), "and does not register the face twice");
+    }
+
+    /// A served font added again after `install_fonts` replaced the stack lands in every family.
+    #[test]
+    fn a_served_font_survives_install_fonts_replacing_the_stack() {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
+        let name = "test-served-reinstall".to_string();
+        assert!(add_served_font(&ctx, name.clone(), photocraft_text::fonts::INTER_REGULAR.to_vec()));
+        ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
+
+        crate::theme::install_fonts(&ctx);
+        ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
+        assert!(!ctx.fonts(|f| f.definitions().font_data.contains_key(&name)), "set_fonts drops the served face");
+
+        assert!(add_served_font(&ctx, name.clone(), photocraft_text::fonts::INTER_REGULAR.to_vec()));
+        ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
+        let fonts = ctx.fonts(|f| f.definitions().clone());
+        assert!(fonts.font_data.contains_key(&name), "back in the stack after the reinstall");
+        for (family, stack) in &fonts.families {
+            assert!(stack.contains(&name), "{family:?} lost the served face");
+        }
+    }
 
     #[test]
     fn lazy_fallbacks_follow_ui_font_size_and_survive_size_changes() {

@@ -294,11 +294,15 @@ preflight_build_tools() {
 
 # --------------------------------------------------------------------------------------- fonts
 
+# Where the served fonts come from: an explicit folder wins, then a craft-fonts checkout next to
+# this repository (the layout docs/development.md and docker/build_image.sh use), then nothing.
 fonts_src() {
   if [ -n "${PHOTOCRAFT_WEB_FONTS_DIR:-}" ]; then
     printf '%s' "$PHOTOCRAFT_WEB_FONTS_DIR"
   elif [ -n "${CRAFT_FONTS_DIR:-}" ] && [ -f "${CRAFT_FONTS_DIR}/fonts/manifest.txt" ]; then
     printf '%s' "$CRAFT_FONTS_DIR"
+  elif [ -f "${ROOT_DIR}/../craft-fonts/fonts/manifest.txt" ]; then
+    printf '%s' "${ROOT_DIR}/../craft-fonts"
   fi
 }
 
@@ -309,7 +313,7 @@ copy_fonts() {
   local dest="$1" src
   src="$(fonts_src)"
   if [ -z "$src" ] || [ ! -f "${src}/fonts/manifest.txt" ]; then
-    warn "no craft-fonts found (set CRAFT_FONTS_DIR or PHOTOCRAFT_WEB_FONTS_DIR): the site serves no extra fonts"
+    warn "no craft-fonts found (clone it to ../craft-fonts, or set CRAFT_FONTS_DIR or PHOTOCRAFT_WEB_FONTS_DIR): the site serves no extra fonts, so CJK text renders as empty boxes"
     return 0
   fi
   log "copying the font manifest and its files from ${src}"

@@ -39,6 +39,8 @@ struct ServedFonts {
     fetched: HashSet<String>,
     /// Downloaded files waiting for the next frame: (family, bytes).
     arrived: Vec<(String, Vec<u8>)>,
+    /// Every file delivered so far, so the UI stack can be handed them again after it is replaced.
+    delivered: Vec<(String, Vec<u8>)>,
 }
 
 type Served = Arc<Mutex<ServedFonts>>;
@@ -225,7 +227,13 @@ fn load_font_manifest(served: Served, ctx: egui::Context) {
         served_fonts::add_fonts(&fonts);
         // Fetch now the fallbacks of the scripts the browser's languages use (an Arabic reader gets
         // the Arabic font before typing); the rest is fetched when text or a font menu needs it.
-        served_fonts::request_for_languages(browser_languages().iter().map(String::as_str));
+        // The app's saved UI language is asked for alongside the browser's.
+        let ui_language = served_ui_language();
+        let mut wanted: Vec<String> = browser_languages();
+        if let Some(l) = &ui_language {
+            wanted.push(l.clone());
+        }
+        served_fonts::request_for_languages(wanted.iter().map(String::as_str));
         ctx.request_repaint();
     });
 }
@@ -233,6 +241,14 @@ fn load_font_manifest(served: Served, ctx: egui::Context) {
 /// The browser's preferred languages (`navigator.languages`, e.g. `["ar-EG", "en"]`).
 fn browser_languages() -> Vec<String> {
     web_sys::window().map(|w| w.navigator().languages().iter().filter_map(|l| l.as_string()).collect()).unwrap_or_default()
+}
+
+/// The UI language the app last saved, from the browser storage `prefs_ui` writes.
+fn served_ui_language() -> Option<String> {
+    let storage = local_storage()?;
+    let raw = storage.get_item(PREFS_KEY).ok()??;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    value.get("interface")?.get("language")?.as_str().map(str::to_string)
 }
 
 /// GET `url` (relative to the page) and read the whole body. With `integrity` (a Subresource
@@ -305,7 +321,9 @@ impl WebShell {
                     fetch.extend(files.into_iter().map(|(file, integrity)| (family.clone(), file, integrity)));
                 }
             }
-            (fetch, std::mem::take(&mut s.arrived))
+            let arrived = std::mem::take(&mut s.arrived);
+            s.delivered.extend(arrived.iter().cloned());
+            (fetch, arrived)
         };
         for (family, file, integrity) in fetch {
             let served = self.served.clone();
@@ -320,7 +338,12 @@ impl WebShell {
                 }
             });
         }
-        served_fonts::install(&mut self.app, arrived);
+        served_fonts::install(&mut self.app, ctx, arrived);
+        // Hands the UI stack every delivered face again; a face already in it is left alone.
+        let delivered = self.served.lock().unwrap_or_else(|e| e.into_inner()).delivered.clone();
+        for (family, bytes) in delivered {
+            served_fonts::reinstall_in_ui(ctx, family, bytes);
+        }
     }
 }
 

@@ -11,6 +11,7 @@ plan
 secrets
 temp
 craft-fonts
+!craft-fonts/fonts
 book/output
 **/.DS_Store
 **/.env

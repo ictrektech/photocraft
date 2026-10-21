@@ -30,6 +30,8 @@ WHITELIST=(
   "ATTRIBUTION.md"
   ".pre-commit-config.yaml"
   ".gitignore"
+  ".dockerignore"
+  "packaging/web/nginx.conf"
 )
 
 # Upstream code paths where the fork deliberately diverges. Touching these is allowed — the fork

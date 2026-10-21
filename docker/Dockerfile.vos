@@ -66,6 +66,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && test -s /src/dist/web/index.html \
     && gzip -9 -k /src/dist/web/*.wasm /src/dist/web/*.js /src/dist/web/index.html
 
+# Installs the fonts the site serves from `fonts/manifest.txt` next to index.html
+# (crates/ui-egui/src/served_fonts.rs) with scripts/vos-fonts.sh, the same script `make vos-dev`
+# runs. The checkout is in the build context under `craft-fonts/`, the one path .dockerignore lets
+# through.
+COPY craft-fonts/ /craft-fonts/
+RUN PHOTOCRAFT_WEB_FONTS_DIR=/craft-fonts bash /src/scripts/vos-fonts.sh /src/dist/web
+
 FROM nginx:${NGINX_VERSION} AS runtime
 LABEL org.opencontainers.image.title="PhotoCraft web" \
       org.opencontainers.image.description="PhotoCraft for VOS (com.ictrek.photocraft): the browser build, served by nginx" \

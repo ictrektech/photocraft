@@ -32,13 +32,16 @@ else
   dest="$(cd "$(dirname "$dest")" && pwd -P)/$(basename "$dest")"
 fi
 
-# Same sources scripts/vos-dev.sh uses: an explicit folder wins, then craft-fonts, then nothing.
+# Same sources scripts/vos-dev.sh and docker/build_image.sh use: an explicit folder wins, then a
+# craft-fonts checkout next to this repository, then nothing.
 if [ -n "${PHOTOCRAFT_WEB_FONTS_DIR:-}" ]; then
   src="$PHOTOCRAFT_WEB_FONTS_DIR"
 elif [ -n "${CRAFT_FONTS_DIR:-}" ] && [ -f "${CRAFT_FONTS_DIR}/fonts/manifest.txt" ]; then
   src="$CRAFT_FONTS_DIR"
+elif [ -f "${ROOT_DIR}/../craft-fonts/fonts/manifest.txt" ]; then
+  src="${ROOT_DIR}/../craft-fonts"
 else
-  echo "[fonts] no craft-fonts (set CRAFT_FONTS_DIR or PHOTOCRAFT_WEB_FONTS_DIR): serving no extra fonts"
+  echo "[fonts] no craft-fonts (clone it to ../craft-fonts, or set CRAFT_FONTS_DIR or PHOTOCRAFT_WEB_FONTS_DIR): serving no extra fonts"
   exit 0
 fi
 
@@ -49,7 +52,20 @@ if [ ! -f "$manifest" ]; then
 fi
 
 mkdir -p "${dest}/fonts"
-cp "$manifest" "${dest}/fonts/manifest.txt"
+# Rewrites the `scripts` column, which `script_fallbacks` (crates/text/src/served.rs) indexes to
+# pick the family each script asks for:
+#   - Noto Sans CJK SC also carries Traditional Chinese and Korean glyphs, so it gains Hant and Kore.
+#   - BIZ UDPGothic goes ahead of Shippori Mincho, the first family a script appears on winning; the
+#     UI's Japanese face is `UI_JAPANESE_FAMILY` (crates/text/src/craft_fonts.rs).
+awk -F' [|] ' 'BEGIN { OFS = " | "; ui = "BIZ UDPGothic" }
+  /^[[:space:]]*(#|$)/ { comments = comments $0 "\n"; next }
+  {
+    if ($1 == "Noto Sans CJK SC" && $4 !~ /(^|,)(Hant|Kore)(,|$)/) $4 = $4 ",Hant,Kore"
+    if ($4 !~ /(^|,)Jpan(,|$)/) other = other $0 "\n"
+    else if ($1 == ui) first = first $0 "\n"
+    else jpan = jpan $0 "\n"
+  }
+  END { printf "%s%s%s%s", comments, first, jpan, other }' "$manifest" > "${dest}/fonts/manifest.txt"
 # Field 3 is the font file and field 6 its licence file, both relative to the folder. The list is
 # materialised first so that a missing file fails the build instead of silently serving less.
 list="$(mktemp)"
@@ -72,5 +88,12 @@ while IFS= read -r f; do
   copied=$((copied + 1))
 done < "$list"
 rm -f "$list"
+
+# Precompresses the font files next to themselves; nginx's `gzip_static on` serves those to any
+# browser that accepts gzip.
+if command -v gzip >/dev/null 2>&1; then
+  find "${dest}/fonts" -type f \( -name '*.otf' -o -name '*.ttf' -o -name '*.ttc' \) -print0 |
+    xargs -0 -r gzip -9 -k -f
+fi
 
 echo "[fonts] served ${copied} file(s) listed by ${manifest} -> ${dest}"
