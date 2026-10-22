@@ -14,5 +14,5 @@ core: "0.10.0"
 repo: storytold/photocraft
 ref: "8407d9ccb"
 base_sha: "8407d9ccb"
-fork_build: 1
+fork_build: 2
 core_bumped: false
