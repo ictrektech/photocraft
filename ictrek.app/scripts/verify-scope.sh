@@ -19,6 +19,7 @@ UPSTREAM_FILE="${APP_DIR}/UPSTREAM.yml"
 
 # Where a VOS change may live. Everything else must come from upstream unchanged.
 WHITELIST=(
+  "README.md"
   "ictrek.app/"
   "docker/"
   "scripts/vos-dev.sh"

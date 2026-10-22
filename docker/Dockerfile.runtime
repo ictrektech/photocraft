@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1
+# Reuse the verified architecture-independent WebAssembly output; compile only the native storage service.
+ARG TOOLCHAIN_IMAGE
+FROM ${TOOLCHAIN_IMAGE} AS storage
+WORKDIR /src
+COPY ictrek.app/server/ ictrek.app/server/
+COPY ictrek.app/tests/ ictrek.app/tests/
+COPY apps/photocraft-web/src/vos/model.rs apps/photocraft-web/src/vos/path.rs apps/photocraft-web/src/vos/
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo test --locked --manifest-path ictrek.app/server/Cargo.toml --release --target-dir /src/target/storage \
+    && cargo build --locked --manifest-path ictrek.app/server/Cargo.toml --release --target-dir /src/target/storage \
+    && cp /src/target/storage/release/photocraft-storage /src/photocraft-storage
+FROM nginx:1.28
+LABEL org.opencontainers.image.title="PhotoCraft web" org.opencontainers.image.licenses="MIT OR Apache-2.0" com.ictrek.vos.app="com.ictrek.photocraft"
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl libgcc-s1 && rm -rf /var/lib/apt/lists/*
+COPY packaging/web/nginx.conf /etc/nginx/nginx.conf
+RUN sed -i '/listen \[::\]:8080;/d' /etc/nginx/nginx.conf
+COPY --from=webdist / /usr/share/nginx/html/
+COPY --from=storage /src/photocraft-storage /usr/local/bin/photocraft-storage
+COPY docker/start-vos.sh /usr/local/bin/start-photocraft
+COPY LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md /usr/share/nginx/html/
+COPY assets/fonts/OFL-*.txt assets/icons/LICENSE-*.txt assets/dict/LICENSE-*.txt crates/ui-egui/src/i18n/LICENSE-translations.txt /usr/share/nginx/html/licenses/
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 CMD curl -fsS http://127.0.0.1:8080/healthz > /dev/null || exit 1
+ENTRYPOINT []
+CMD ["/bin/sh", "/usr/local/bin/start-photocraft"]

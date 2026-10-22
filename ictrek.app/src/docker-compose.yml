@@ -6,6 +6,10 @@
 
 x-photocraft-web: &photocraft-web
   restart: unless-stopped
+  environment:
+    VOS_OIDC_USERINFO_URL: ${VOS_OIDC_USERINFO_URL:-http://172.17.0.1:8105/v1000/oauth2/userinfo}
+  volumes:
+    - ${VOS_APP_EXPOSED_PATH:-/nonexistent}:/exposed:rslave
   networks:
     vos_default:
       aliases:
@@ -31,7 +35,7 @@ x-photocraft-web: &photocraft-web
     - "traefik.http.middlewares.photocraft-web-strip.stripprefix.prefixes=/app/com.ictrek.photocraft"
     - "traefik.http.services.photocraft-web.loadbalancer.server.port=8080"
   healthcheck:
-    test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1"]
+    test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/healthz > /dev/null || exit 1"]
     interval: 30s
     timeout: 10s
     start_period: 10s

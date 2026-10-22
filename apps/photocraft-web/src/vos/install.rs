@@ -35,6 +35,9 @@ use super::{bridge, home, http, model};
 #[derive(Default)]
 #[cfg_attr(test, expect(dead_code, reason = "host tests drive the upload scheduling only"))]
 struct State {
+    installed: bool,
+    failed_saves: Vec<String>,
+    completed: Vec<String>,
     picker: Option<Picker>,
     /// 正在等选择器作答的对话框。停在这里而不是选择器里，这样在途请求永远不会丢掉它
     /// （丢掉的回复会被读成取消）。
@@ -81,10 +84,13 @@ pub fn active() -> bool {
 /// 必须在 app 运行前调用一次。没有桥时什么都不改。
 #[cfg(target_arch = "wasm32")]
 pub fn install(services: &mut Services) {
-    if !active() {
-        log::info!("photocraft-web: no VOS bridge; keeping the browser file dialogs");
+    if with(|s| s.installed) {
         return;
     }
+    if !active() {
+        return;
+    }
+    with(|s| s.installed = true);
     // 首页的列表通过 localStorage 在刷新后保留。
     let stored = web_sys::window().and_then(|w| w.local_storage().ok().flatten()).and_then(|s| s.get_item(home::RECENT_KEY).ok().flatten());
     with(|s| s.recent = Recent::load(stored.as_deref()));
@@ -104,7 +110,14 @@ pub fn install(services: &mut Services) {
             clear_query();
         }
     }
-    services.file_dialog = Some(Box::new(|request, _parent, reply| show_dialog(request, reply)));
+    super::sources::install(services.file_dialog.take());
+    services.file_dialog = Some(Box::new(|request, _parent, reply| {
+        if matches!(request, FileDialogRequest::Open { .. } | FileDialogRequest::Save { .. }) {
+            super::sources::choose(request, reply);
+        } else {
+            show_dialog(request, reply);
+        }
+    }));
     services.platform_files = Some(Box::new(|| with(|s| home::listing(s.recent.paths()))));
     services.platform_open = Some(Box::new(|request| match request {
         PlatformRequest::Open(path) => home::open(path, |path, result| {
@@ -132,7 +145,7 @@ pub fn install(services: &mut Services) {
 
     let mut save_to_disk = services.write.take();
     services.write = Some(Box::new(move |path: &str, bytes: &[u8]| {
-        if path::adapter_of(path).is_none() {
+        if path::adapter_of(path).is_none() && !path.starts_with(super::sources::ALBUM_PREFIX) {
             return match save_to_disk.as_mut() {
                 Some(write) => write(path, bytes),
                 // `web.rs` 在本插件之前就装好了下载写入器，所以这里走不到。
@@ -194,10 +207,10 @@ fn due_uploads(s: &mut State) -> Vec<(String, Vec<u8>, u64)> {
 
 /// 为 `request` 打开选择器，把 `reply` 停放起来等用户作答。
 #[cfg(target_arch = "wasm32")]
-fn show_dialog(request: FileDialogRequest, reply: photocraft_ui_egui::FileDialogReply) {
+pub(super) fn show_dialog(request: FileDialogRequest, reply: photocraft_ui_egui::FileDialogReply) {
     let picker = match request {
-        FileDialogRequest::Open { multiple, .. } => {
-            Picker::new(Mode::Open { multiple }, crate::web::OPEN_EXTS.iter().map(|e| (*e).to_string()).collect(), None)
+        FileDialogRequest::Open { multiple, extensions, .. } => {
+            Picker::new(Mode::Open { multiple }, extensions.unwrap_or_else(|| crate::web::OPEN_EXTS.iter().map(|e| (*e).to_string()).collect()), None)
         }
         FileDialogRequest::Save { suggested } => Picker::new(Mode::Save, Vec::new(), Some(&suggested)),
         // 文件夹对话框在这里对 Finder 没有意义；回取消，让命令自己报出来。
@@ -257,6 +270,7 @@ fn answer(choice: Option<Choice>) {
 /// 每帧：打开已到齐的数据、报告错误、上传保存、绘制选择器，并完成上一帧开始的事。
 #[cfg(target_arch = "wasm32")]
 pub fn ui(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    super::sources::ui(ctx);
     // 首页的"浏览"行：就是普通的 File > Open，由我们自己的对话框作答。
     if with(|s| std::mem::take(&mut s.browse))
         && let Err(e) = app.open_dialog_file()
@@ -320,13 +334,44 @@ pub fn ui(app: &mut PhotocraftApp, ctx: &egui::Context) {
         store_recent();
     }
 
+    // Failed asynchronous writes must keep the document dirty so closing still asks to save it.
+    for path in with(|s| std::mem::take(&mut s.failed_saves)) {
+        let original = app.session.active_index();
+        let indices: Vec<_> =
+            app.session.documents().iter().enumerate().filter_map(|(i, doc)| (doc.path.as_deref() == Some(path.as_str())).then_some(i)).collect();
+        for index in indices {
+            app.session.set_active(index);
+            if let Some(doc) = app.session.active_mut() {
+                doc.saved_revision = doc.revision.wrapping_add(1);
+            }
+        }
+        if let Some(index) = original {
+            app.session.set_active(index);
+        }
+    }
+    for message in with(|s| std::mem::take(&mut s.completed)) {
+        app.ui.status = message.clone();
+        app.ui.status_error = false;
+        photocraft_ui_egui::notices::post(app, message, Vec::new(), false, None);
+    }
     // 保存的字节：发射可以发的上传，然后报告已经发出去的那些的结果。
     for (path, bytes, ticket) in start_due() {
+        app.ui.status = if path.starts_with(super::sources::ALBUM_PREFIX) {
+            super::sources::text("Uploading image to AI Album…", "正在上传成品到 AI 相册…")
+        } else {
+            super::sources::text("Saving to VOS…", "正在保存到 VOS…")
+        }
+        .into();
+        app.ui.status_error = false;
         let ctx = ctx.clone();
         spawn_local(async move {
-            let result = match FinderPath::split_file(&path) {
-                Some((dir, name)) => http::upload(&dir, &name, &bytes).await,
-                None => Err(model::Failure { code: model::BAD_PATH, message: format!("{path} is not a VOS storage path") }),
+            let result = if path.starts_with(super::sources::ALBUM_PREFIX) {
+                super::sources::upload(&path, &bytes).await
+            } else {
+                match FinderPath::split_file(&path) {
+                    Some((dir, name)) => http::upload(&dir, &name, &bytes).await,
+                    None => Err(model::Failure { code: model::BAD_PATH, message: format!("{path} is not a VOS storage path") }),
+                }
             };
             finish_save(&path, ticket, result);
             ctx.request_repaint();
@@ -530,11 +575,21 @@ fn finish_save(path: &str, ticket: u64, result: Result<(), model::Failure>) {
     });
     match result {
         // 只有到达 VOS 的保存才属于首页。
-        Ok(()) => with(|s| s.recent.record(path)),
+        Ok(()) => with(|s| {
+            if path.starts_with(super::sources::ALBUM_PREFIX) {
+                s.completed.push(super::sources::text("Image exported to AI Album", "成品图片已导出到 AI 相册").into());
+            } else {
+                s.recent.record(path);
+            }
+        }),
         Err(e) if !waiting => {
             // 外壳已经宣布“已保存”，所以失败必须说出来：说清是哪个文件，且文件没丢。
             let name = path::display_name(path);
-            with(|s| s.errors.push(format!("{name} was not saved to VOS: {e} (the document is still in PhotoCraft, unsaved)")));
+            let destination = if path.starts_with(super::sources::ALBUM_PREFIX) { "AI Album" } else { "VOS" };
+            with(|s| {
+                s.failed_saves.push(path.to_string());
+                s.errors.push(format!("{name} was not saved to {destination}: {e}. The document is still in PhotoCraft; retry saving."));
+            });
         }
         Err(e) => log::warn!("photocraft-web: save of {path} failed, a newer one is queued: {e}"),
     }

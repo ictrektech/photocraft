@@ -1,20 +1,8 @@
 #!/usr/bin/env bash
 # Build, tag and (optionally) publish the PhotoCraft VOS web image.
 #
-#   docker/build_image.sh                       # host architecture, push, record in Feishu
-#   docker/build_image.sh --arch arm            # arm64 (needs buildx + qemu on an amd64 host)
-#   docker/build_image.sh --no-push --no-feishu # local build only
-#   docker/build_image.sh --tag-suffix r2       # second build of the same commit on the same day
-#
-# One tag, following the VAI convention (see ../nowen-video/build_image.sh):
-#   <arch>_<YYYYMMDD>_<short sha>[-r<N>]     what the Feishu sheet records and package.sh reads
-#
-# The version is deliberately NOT part of the tag: the tag says which commit and when, while the
-# release it belongs to lives in the org.opencontainers.image.version label, in ictrek.app/VERSION
-# and in ictrek.app/UPSTREAM.yml. A second <version>-<arch> tag used to be pushed as a
-# "human-readable" alias; nothing consumed it (package.sh and audit-package.sh both validate the
-# main tag against TAG_RE, which rejects that form), and it silently overwrote itself whenever
-# --tag-suffix was used, so a second build of the same day could not be pulled by version.
+# Run on a matching build host after rsync, with PHOTOCRAFT_BUILD_SHA supplied from the local checkout.
+# Tags are fixed <arch>_<YYYYMMDD>; version/revision are recorded in OCI labels.
 set -euo pipefail
 
 REGISTRY="${REGISTRY:-swr.cn-southwest-2.myhuaweicloud.com}"
@@ -45,7 +33,6 @@ GITHUB_ACCELERATOR="${GITHUB_ACCELERATOR:-https://gh-proxy.com/}"
 ARCH=""
 PUSH=1
 FEISHU=1
-TAG_SUFFIX=""
 SHEETS=()
 
 log() { echo "[build_image] $*"; }
@@ -53,10 +40,9 @@ die() { echo "[build_image][ERROR] $*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-Usage: docker/build_image.sh [--arch amd|arm] [--tag-suffix S] [--sheet S]... [--no-push] [--no-feishu]
+Usage: docker/build_image.sh [--arch amd|arm] [--sheet S]... [--no-push] [--no-feishu]
 
   --arch amd|arm     target architecture (default: the build host's)
-  --tag-suffix S     append -S to the tag (a second build of the same commit the same day)
   --sheet S          Feishu sheet to record into (default: the sheets for the target architecture)
   --no-push          build and tag locally, do not push
   --no-feishu        do not read credentials or write to the sheet
@@ -66,7 +52,6 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --arch) ARCH="${2:-}"; shift 2 ;;
-    --tag-suffix) TAG_SUFFIX="${2:-}"; shift 2 ;;
     --sheet) SHEETS+=("${2:-}"); shift 2 ;;
     --no-push) PUSH=0; shift ;;
     --push) PUSH=1; shift ;;
@@ -91,21 +76,16 @@ case "${ARCH}" in
   amd|arm) ;;
   *) die "--arch must be amd or arm" ;;
 esac
-case "${TAG_SUFFIX}" in
-  ""|r[0-9]*) ;;
-  *) die "--tag-suffix must look like r2" ;;
-esac
-
 [[ -f "${VERSION_FILE}" ]] || die "missing ${VERSION_FILE}"
 VERSION="$(tr -d '[:space:]' < "${VERSION_FILE}")"
 [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-vos\.[0-9]+)?(\+[0-9A-Za-z.-]+)?$ ]] \
   || die "invalid ictrek.app/VERSION: ${VERSION}"
 
-GIT_SHA="$(git -C "${ROOT_DIR}" rev-parse --short=9 HEAD 2>/dev/null)" || die "not a git repository"
+GIT_SHA="${PHOTOCRAFT_BUILD_SHA:-}"
+[[ "${GIT_SHA}" =~ ^[0-9a-f]{7,40}$ ]] || die "set PHOTOCRAFT_BUILD_SHA to the verified local checkout commit before syncing to the build host"
 BUILD_DATE="$(date -u +%Y%m%d)"
 BUILD_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-MAIN_TAG="${ARCH}_${BUILD_DATE}_${GIT_SHA}"
-[[ -n "${TAG_SUFFIX}" ]] && MAIN_TAG="${MAIN_TAG}-${TAG_SUFFIX}"
+MAIN_TAG="${ARCH}_${BUILD_DATE}"
 case "${ARCH}" in
   amd) DOCKER_ARCH="amd64" ;;
   arm) DOCKER_ARCH="arm64" ;;
@@ -162,6 +142,13 @@ if ! docker image inspect "${TOOLCHAIN_IMAGE}" >/dev/null 2>&1 \
         docker/build_toolchain.sh"
 fi
 
+# A second architecture can reuse the exact verified WASM output instead of compiling it twice.
+WEB_DIST="${PHOTOCRAFT_WEB_DIST:-}"
+if [[ -n "${WEB_DIST}" ]]; then
+  [[ -s "${WEB_DIST}/index.html" && -f "${WEB_DIST}/source-revision" ]] || die "missing verified web distribution"
+  [[ "$(cat "${WEB_DIST}/source-revision")" == "${GIT_SHA}" ]] || die "web distribution revision differs from PHOTOCRAFT_BUILD_SHA"
+  DOCKERFILE="docker/Dockerfile.runtime"
+else
 # Copies the craft-fonts `fonts/` folder into the build context, where docker/Dockerfile.vos hands
 # it to scripts/vos-fonts.sh. The copy is a real directory, since Docker leaves a symlinked one out
 # of the context. The path is git-ignored.
@@ -181,6 +168,8 @@ mkdir -p "${FONTS_DIR}"
 cp -r "${CRAFT_FONTS_SRC}/fonts" "${FONTS_DIR}/" || die "copying ${CRAFT_FONTS_SRC}/fonts failed"
 log "fonts from ${CRAFT_FONTS_SRC} ($(du -sh "${FONTS_DIR}/fonts" | cut -f1))"
 
+fi
+
 build_args=(
   --file "${DOCKERFILE}"
   --build-arg "TOOLCHAIN_IMAGE=${TOOLCHAIN_IMAGE}"
@@ -195,14 +184,16 @@ build_args=(
   -t "${MAIN_IMAGE}"
 )
 
-if [[ "${ARCH}" == "${host_arch}" ]]; then
+if [[ -n "${WEB_DIST}" ]]; then
+  ( cd "${ROOT_DIR}" && docker buildx build --platform "linux/${DOCKER_ARCH}" --load --provenance=false --sbom=false --network host --build-context "webdist=${WEB_DIST}" "${build_args[@]}" . )
+elif [[ "${ARCH}" == "${host_arch}" ]]; then
   # Native build: the plain builder is enough and reuses the local layer cache.
-  ( cd "${ROOT_DIR}" && docker build "${build_args[@]}" . )
+  ( cd "${ROOT_DIR}" && docker build --network host "${build_args[@]}" . )
 else
   # Cross-architecture build (an amd64 host producing the arm64 image): buildx with qemu.
   docker buildx version >/dev/null 2>&1 || die "cross-building ${ARCH} needs \`docker buildx\` (and binfmt/qemu)"
   log "cross-building with buildx --platform linux/${DOCKER_ARCH}"
-  ( cd "${ROOT_DIR}" && docker buildx build --platform "linux/${DOCKER_ARCH}" --load "${build_args[@]}" . )
+  ( cd "${ROOT_DIR}" && docker buildx build --platform "linux/${DOCKER_ARCH}" --load --provenance=false --sbom=false --network host "${build_args[@]}" . )
 fi
 
 if (( PUSH )); then

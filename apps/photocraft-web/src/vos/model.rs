@@ -80,6 +80,8 @@ pub struct Index {
 pub struct Volume {
     pub uuid: String,
     #[serde(default)]
+    pub adapter: Option<String>,
+    #[serde(default)]
     pub nick_name: Option<String>,
     #[serde(default)]
     pub name: String,
@@ -93,7 +95,7 @@ impl Volume {
 
     /// 这块卷的 Finder adapter。平台前端在 uuid 前加了 v_。
     pub fn adapter(&self) -> String {
-        format!("v_{}", self.uuid)
+        self.adapter.clone().unwrap_or_else(|| format!("v_{}", self.uuid))
     }
 }
 
@@ -314,6 +316,7 @@ fn raw_trimmed(body: &str) -> &str {
 /// 而且 HTTP 状态始终是 200，`fetch` 两种情况都算成功。
 /// token 过期时回 `{"code":10001,...,"msg":"RS256 JWT 校验失败: ExpiredSignature"}`，完全没有
 /// `sub`；正常时回 `{"sub":"01M31...","preferred_username":"..."}`。
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub fn userinfo_sub(text: &str) -> Result<String, Failure> {
     #[derive(Deserialize)]
     struct Userinfo {
@@ -576,9 +579,9 @@ mod tests {
 
     #[test]
     fn a_volume_without_a_nickname_falls_back_to_its_name() {
-        let v = Volume { uuid: "u".into(), nick_name: Some("   ".into()), name: "Volume 1".into() };
+        let v = Volume { uuid: "u".into(), adapter: None, nick_name: Some("   ".into()), name: "Volume 1".into() };
         assert_eq!(v.label(), "Volume 1");
-        let v = Volume { uuid: "u".into(), nick_name: None, name: "Volume 2".into() };
+        let v = Volume { uuid: "u".into(), adapter: None, nick_name: None, name: "Volume 2".into() };
         assert_eq!(v.label(), "Volume 2");
     }
 
@@ -719,5 +722,47 @@ mod tests {
         let json = r#"{"code": 0, "data": {"adapter": "v_x", "files": []}}"#;
         let body: ResultBody<Index> = serde_json::from_str(json).expect("a valid reply");
         assert!(body.data.expect("data").files.is_empty());
+    }
+}
+
+/// Translate VOS locale tags to PhotoCraft's existing catalog names.
+pub fn locale_code(raw: &str) -> Option<&'static str> {
+    match raw.to_ascii_lowercase().replace('_', "-").as_str() {
+        "zh" | "zh-cn" | "zh-hans" => Some("zh-hans"),
+        "zh-tw" | "zh-hk" | "zh-hant" => Some("zh-hant"),
+        "en" | "en-us" | "en-gb" => Some("en"),
+        _ => None,
+    }
+}
+#[cfg(test)]
+mod source_tests {
+    #[test]
+    fn vos_locales_use_existing_catalogs() {
+        for (input, expected) in [("zh-CN", "zh-hans"), ("zh_TW", "zh-hant"), ("en-US", "en")] {
+            assert_eq!(super::locale_code(input), Some(expected));
+        }
+        assert_eq!(super::locale_code("unknown"), None);
+    }
+    #[test]
+    fn exposed_directory_keeps_its_own_adapter() {
+        let volume: super::Volume = serde_json::from_str(r#"{"uuid":"grant","adapter":"x_grant","name":"Public"}"#).unwrap();
+        assert_eq!(volume.adapter(), "x_grant");
+    }
+}
+
+/// AI Album accepts rendered images, not layered project documents.
+pub fn album_export_name(suggested: &str) -> Option<String> {
+    let name = std::path::Path::new(suggested).file_name()?.to_str()?;
+    let extension = std::path::Path::new(name).extension()?.to_str()?.to_ascii_lowercase();
+    matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp").then(|| name.to_owned())
+}
+#[cfg(test)]
+mod export_tests {
+    #[test]
+    fn album_destination_accepts_renders_and_preserves_projects() {
+        assert_eq!(super::album_export_name("x_grant://folder/result.PNG"), Some("result.PNG".into()));
+        assert!(super::album_export_name("layers.psd").is_none());
+        assert!(super::album_export_name("layers.pcraft").is_none());
+        assert!(super::album_export_name("result.svg").is_none());
     }
 }

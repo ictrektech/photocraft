@@ -1,0 +1,10 @@
+configs:
+  - name: VOS_OIDC_USERINFO_URL
+    type: string
+    title:
+      zh-CN: VOS 身份验证地址
+      en: VOS identity endpoint
+    description:
+      zh-CN: 校验当前用户身份，一般无需修改。
+      en: Verifies the current VOS user. Usually no change is needed.
+    default: http://172.17.0.1:8105/v1000/oauth2/userinfo

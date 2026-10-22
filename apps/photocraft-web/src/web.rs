@@ -374,6 +374,8 @@ impl eframe::App for WebShell {
             });
         }
         self.serve_fonts(ctx);
+        crate::vos::install(&mut self.app.services);
+        crate::vos::sync_locale(&mut self.app, ctx);
         self.app.logic(ctx, frame);
         self.save_presets(ctx);
     }

@@ -36,3 +36,15 @@ mod picker;
 
 #[cfg(target_arch = "wasm32")]
 pub use install::{install, ui};
+
+#[cfg(target_arch = "wasm32")]
+mod locale;
+#[cfg(target_arch = "wasm32")]
+mod sources;
+#[cfg(target_arch = "wasm32")]
+pub use locale::sync as sync_locale;
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn sources_text<'a>(en: &'a str, zh: &'a str) -> &'a str {
+    if photocraft_ui_egui::i18n::current().code().starts_with("zh") { zh } else { en }
+}

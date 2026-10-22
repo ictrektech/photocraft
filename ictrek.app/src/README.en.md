@@ -20,11 +20,8 @@ WebAssembly, running entirely in your browser with no server-side compute.
 
 ## Using it inside VOS
 
-- Open PhotoCraft from the sidebar; it is embedded in the platform page. The UI language follows
-  your browser and can be changed in **Edit › Preferences › Interface**.
-- **Documents live in this browser tab only.** This first release opens and saves through the
-  browser's own file picker and downloads; nothing is written to the NAS and there is no
-  server-side session. Closing the tab discards unsaved work, exactly like closing a desktop window.
+- Open PhotoCraft from the sidebar; it is embedded in the platform page and follows live VOS language changes.
+- Editing happens in the browser tab. Save before closing: download to this computer, write to a VOS-authorized directory, or export a finished image to AI Album.
 - Rendering prefers **WebGPU** and falls back to **WebGL2**. If the canvas misbehaves, append
   `?webgl` (force WebGL2) or `?cpu` (force the CPU canvas) to the URL and reload.
 
@@ -40,3 +37,20 @@ WebAssembly, running entirely in your browser with no server-side compute.
 PhotoCraft is released under **MIT OR Apache-2.0**. The upstream project is
 <https://github.com/storytold/photocraft>; copyright and third-party asset credits are served with
 the site in `NOTICE`, `ATTRIBUTION.md` and `/licenses/`.
+
+## Image sources and saving
+
+File → Open offers this computer, VOS, and AI Album. Saving offers a browser download or a VOS directory.
+Grant PhotoCraft directories through VOS App management → Data access authorization, then refresh the picker.
+Public and current-user directories are supported; read-only grants cannot be saved to. An admin personal-volume allocation is not required.
+AI Album uses the current VOS identity without another password or API key. AI Album must be installed with VOS login enabled.
+Only that account's accessible images are shown. Images open as editable copies; save to this computer or VOS to keep the album original.
+The UI follows the VOS language on startup and on live language changes without reloading.
+
+### Export finished images to AI Album
+
+Save and Export retain browser download and VOS destinations. For PNG, JPEG and WebP output,
+the destination chooser also offers **Export image to AI Album**. The same user session uploads
+the encoded result, checks the returned asset through the album API, and only then confirms success.
+Original album images are preserved. Layered PSD/PCraft projects stay on this computer or VOS.
+Failed asynchronous saves report the failure and restore the document's unsaved state so it can be retried.

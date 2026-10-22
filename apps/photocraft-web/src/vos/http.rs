@@ -18,10 +18,7 @@ use super::path::FinderPath;
 /// 平台 Finder 的基础路径（同源：页面就由平台主机提供）。
 const FINDER: &str = "/v1000/finder_next";
 /// 按用户列出的卷表，一块卷的 Finder adapter 就是从这里发现的。
-const USER_VOLUMES: &str = "/v1000/nas/users/volumes/list";
-/// 已登录用户自己的档案，里面带着卷表用作键的 id。
-const USERINFO: &str = "/v1000/oauth2/userinfo";
-
+const STORAGE: &str = "/app/com.ictrek.photocraft/storage";
 /// 本插件在浏览器里能打开的最大文件。
 ///
 /// wasm 构建只有一个 2-4 GB 的堆，要装下所有东西（页面、文件、合成器的缓冲区），而字节在
@@ -82,7 +79,7 @@ async fn send(init: &web_sys::RequestInit, url: &str) -> Result<web_sys::Respons
     // 在读取正文之前就判断：SSE 接口把 10001 发成 `error` 事件，而那永远不会变成响应文本，
     // 交给解码器只会把 403 报成空响应或无法解析的响应，并且永远不换新令牌重试。
 
-    if matches!(response.status(), 401 | 403) {
+    if response.status() == 401 || response.status() == 403 && !url.starts_with(STORAGE) {
         bridge::forget_token();
         return Err(Failure { code: 10001, message: error_message(10001, "") });
     }
@@ -117,23 +114,16 @@ fn authorized(method: &str, token: &str) -> Result<web_sys::RequestInit, Failure
 /// 一次 GET；平台报告令牌被拒时换新令牌重试一次。
 async fn get(url: &str) -> Result<String, Failure> {
     let token = token().await?;
-    let text = reply(&authorized("GET", &token)?, url, "VOS").await?;
+    let text = match reply(&authorized("GET", &token)?, url, "VOS").await {
+        Ok(text) => text,
+        Err(error) if error.is_unauthorized() => return reply(&authorized("GET", &renew().await?)?, url, "VOS").await,
+        Err(error) => return Err(error),
+    };
     if !refused(&text) {
         return Ok(text);
     }
     let token = renew().await?;
     reply(&authorized("GET", &token)?, url, "VOS").await
-}
-
-async fn post(url: &str, body: &str) -> Result<String, Failure> {
-    let body = JsValue::from_str(body);
-    let token = token().await?;
-    let text = send_body(url, &body, &token).await?;
-    if !refused(&text) {
-        return Ok(text);
-    }
-    let token = renew().await?;
-    send_body(url, &body, &token).await
 }
 
 /// 用 `token` POST 一份 `body`，检查响应并拆掉 SSE 封装。
@@ -146,48 +136,18 @@ async fn send_body(url: &str, body: &JsValue, token: &str) -> Result<String, Fai
 /// 列出一个目录。平台分开接收 adapter 和路径：路径是完整的 Finder 路径，平台自己的
 /// `fs_path_from_raw` 会把它再剥回去。
 pub async fn index(dir: &FinderPath) -> Result<Index, Failure> {
-    let url = format!("{FINDER}/index?adapter={}&path={}", model::encode(&dir.adapter), model::encode(&dir.api_path()));
+    let url = format!("{}/index?adapter={}&path={}", finder(&dir.adapter), model::encode(&dir.adapter), model::encode(&dir.api_path()));
     body(&get(&url).await?)
 }
 
-/// `volumes/list` 每页要求返回多少块卷。
-const VOLUME_PAGE: u64 = 64;
-
-/// 已登录用户能访问的卷，各自带上 adapter。
-///
-/// 逐页读到某一页没有新东西为止（这样忽略 `page_num` 的平台不会让它空转），或者达到 `total`。
+/// Directories granted through the VOS application's Data access authorization screen.
 pub async fn volumes() -> Result<Vec<Volume>, Failure> {
-    let sub = user_sub().await?;
-    let mut volumes: Vec<Volume> = Vec::new();
-    let mut page_num = 1;
-    loop {
-        let request = serde_json::json!({ "user_id": sub, "page_num": page_num, "page_size": VOLUME_PAGE }).to_string();
-        let page: VolumePage = body(&post(USER_VOLUMES, &request).await?)?;
-        let before = volumes.len();
-        volumes.extend(page.volumes);
-        if volumes.len() == before || volumes.len() as u64 >= page.total {
-            return Ok(volumes);
-        }
-        page_num += 1;
-    }
+    let page: VolumePage = body(&get(&format!("{STORAGE}/volumes")).await?)?;
+    Ok(page.volumes)
 }
 
-/// 已登录用户的 id（`sub`），卷表以它为键。
-///
-/// 在这里取而不是走桥的 `userinfo`（它在 JS 里解析响应）：该接口同源、接受普通 bearer
-/// 令牌，并且把拒绝回成 HTTP 200 的错误信封，所以正文在 Rust 里读取并解码（见
-/// `model::userinfo_sub`）。
-async fn user_sub() -> Result<String, Failure> {
-    let text = get(USERINFO).await?;
-    // 成功是纯 OIDC 档案，失败是 `ResultBody` 错误信封。
-    let failure = match model::userinfo_sub(&text) {
-        Ok(sub) => return Ok(sub),
-        Err(failure) => failure,
-    };
-    if failure.is_unauthorized() {
-        bridge::forget_token();
-    }
-    Err(failure)
+fn finder(adapter: &str) -> &'static str {
+    if adapter.starts_with("x_") { STORAGE } else { FINDER }
 }
 
 /// 这个失败是不是重试也不会好，从而首页应当忘掉那一行：路径已不存在（[`Failure::is_missing`]），
@@ -202,7 +162,7 @@ pub fn hopeless(error: &Failure) -> bool {
 /// `adapter` 必填且必须是真实的 adapter：平台 `prepare` 会以 10045 拒绝空 adapter，所以
 /// 既不能省略，也不能从 `path` 里推断。
 pub async fn download(adapter: &str, path: &str) -> Result<Vec<u8>, Failure> {
-    let url = format!("{FINDER}/download?adapter={}&path={}", model::encode(adapter), model::encode(path));
+    let url = format!("{}/download?adapter={}&path={}", finder(adapter), model::encode(adapter), model::encode(path));
     // 先按 index 报出的大小拒绝，一个字节都不取：2 GB 的下载会填满堆，把整个标签页拖垮。
 
     if let Some(size) = listed(adapter, path).await
@@ -308,7 +268,7 @@ pub async fn new_folder(parent: &FinderPath, name: &str) -> Result<(), Failure> 
 
 /// 往 Finder 的一个 `action` 发 `payload`；令牌过期时刷新一次再试。
 async fn post_finder(action: &str, payload: serde_json::Value) -> Result<(), Failure> {
-    let url = format!("{FINDER}/{action}");
+    let url = format!("{}/{action}", finder(payload["adapter"].as_str().unwrap_or("")));
     let request = JsValue::from_str(&payload.to_string());
     let token = token().await?;
     let mut text = send_body(&url, &request, &token).await?;
@@ -324,6 +284,22 @@ async fn post_finder(action: &str, payload: serde_json::Value) -> Result<(), Fai
 /// `conflict_strategy=overwrite` 必填：平台默认是 `reject`，那样一次普通的 Ctrl+S 就会变成
 /// "文件已存在"错误。
 pub async fn upload(dir: &FinderPath, name: &str, bytes: &[u8]) -> Result<(), Failure> {
+    if dir.adapter.starts_with("x_") {
+        let url = format!("{STORAGE}/upload?adapter={}&path={}&name={}", model::encode(&dir.adapter), model::encode(&dir.api_path()), model::encode(name));
+        let send = |token: String| {
+            let url = url.clone();
+            async move {
+                let init = authorized("POST", &token)?;
+                init.set_body(&js_sys::Uint8Array::from(bytes));
+                reply(&init, &url, "VOS save").await
+            }
+        };
+        let text = match send(token().await?).await {
+            Err(error) if error.is_unauthorized() => send(renew().await?).await?,
+            other => other?,
+        };
+        return body::<String>(&text).map(|_| ());
+    }
     let array = js_sys::Uint8Array::from(bytes);
     let blob = web_sys::Blob::new_with_u8_array_sequence(&js_sys::Array::of1(&array)).map_err(broke)?;
     let url = format!("{FINDER}/upload");

@@ -26,7 +26,7 @@ ARG RUST_VERSION=1.99
 ARG TRUNK_VERSION=0.21.14
 ARG WASM_BINDGEN_VERSION=0.2.129
 ARG WASM_OPT_VERSION=version_123
-ARG NGINX_VERSION=1.28-alpine
+ARG NGINX_VERSION=1.28
 # The fingerprint of the network knobs (CARGO_REGISTRY_MIRROR, GITHUB_ACCELERATOR) that the
 # toolchain tag carries; docker/toolchain_tag.sh computes it. It only matters for the FROM line
 # below: docker/build_image.sh passes a complete TOOLCHAIN_IMAGE and never uses this. The default is
@@ -48,6 +48,11 @@ FROM ${TOOLCHAIN_IMAGE:-${REGISTRY}/${NAMESPACE}/photocraft-toolchain:rust${RUST
 
 WORKDIR /src
 COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo test --manifest-path ictrek.app/server/Cargo.toml --release --target-dir /src/target/storage \
+    && cargo build --manifest-path ictrek.app/server/Cargo.toml --release --target-dir /src/target/storage \
+    && cp /src/target/storage/release/photocraft-storage /src/photocraft-storage
 WORKDIR /src/apps/photocraft-web
 ARG CARGO_PROFILE_WASM_RELEASE_LTO=thin
 # wasm-release is fat/thin LTO with codegen-units = 1: the highest peak memory in the workspace,
@@ -74,6 +79,7 @@ COPY craft-fonts/ /craft-fonts/
 RUN PHOTOCRAFT_WEB_FONTS_DIR=/craft-fonts bash /src/scripts/vos-fonts.sh /src/dist/web
 
 FROM nginx:${NGINX_VERSION} AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl libgcc-s1 && rm -rf /var/lib/apt/lists/*
 LABEL org.opencontainers.image.title="PhotoCraft web" \
       org.opencontainers.image.description="PhotoCraft for VOS (com.ictrek.photocraft): the browser build, served by nginx" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0" \
@@ -96,9 +102,11 @@ COPY --from=builder /src/dist/web/ /usr/share/nginx/html/
 COPY LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md /usr/share/nginx/html/
 COPY assets/fonts/OFL-*.txt assets/icons/LICENSE-*.txt assets/dict/LICENSE-*.txt \
     crates/ui-egui/src/i18n/LICENSE-translations.txt /usr/share/nginx/html/licenses/
-USER nginx
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget -q -O /dev/null http://127.0.0.1:8080/healthz || exit 1
+    CMD curl -fsS http://127.0.0.1:8080/healthz > /dev/null || exit 1
 ENTRYPOINT []
-CMD ["nginx", "-g", "daemon off;"]
+
+COPY --from=builder /src/photocraft-storage /usr/local/bin/photocraft-storage
+COPY docker/start-vos.sh /usr/local/bin/start-photocraft
+CMD ["/bin/sh", "/usr/local/bin/start-photocraft"]

@@ -5,11 +5,13 @@
 `apps/motrix-next/ictrek.app` 为蓝本）。正式发布以 `update_version.sh` 触发的 GitHub Actions
 为准（`.github/workflows/vos-release.yml`）。
 
-## 第 0 期范围
+## 运行方式
 
-- 交付**上游 web 构建产物**（wasm + nginx），无后端、无持久化、无 system 依赖。
-- 文档只活在这个浏览器标签页里（与上游 Web 版行为一致）；没有安装参数。
-- 两层 profile 只用于挑选按架构区分的 nginx 基础镜像，站点内容与架构无关。
+同一镜像包含 WebAssembly 编辑器、nginx 和一个小型 Rust 授权目录服务。
+浏览器保留本机打开/下载，支持 VOS 数据访问授权目录和 AI 相册免二次登录选图。
+`VOS_APP_EXPOSED_PATH` 由平台注入，挂载到 `/exposed`；文件按平台授权读写。
+授权服务每次请求向 `VOS_OIDC_USERINFO_URL` 校验当前用户，不保存应用私有文件。
+原相册图片保持不变，编辑副本可保存到本机或 VOS。
 
 ## 版本
 
@@ -24,11 +26,9 @@ ictrek.app/UPSTREAM.yml                    ← core / ref / fork_build（供 CI 
 | 同一 core 的第二次交付 | `./update_version.sh` | `0.8.2-vos.2` |
 | 我们主动抬 core（不兼容二开） | `./update_version.sh --core 0.9.0 --base 0.8.2` | `0.9.0-vos.1+up0.8.2` |
 
-镜像 tag 与上面解耦（VAI 惯例）：只有一个 tag `<arch>_<YYYYMMDD>_<sha>`，`package.sh` 和
-`audit-package.sh` 都从飞书读它并用同一个 `TAG_RE` 校验。版本不在 tag 里——它在
-`org.opencontainers.image.version` label、`VERSION` 和 `UPSTREAM.yml` 里。（以前另打一个可读的
-`<完整版本>-<arch>` 发布 tag，已删：没有任何脚本引用它，`TAG_RE` 也拒绝该格式，而且它不带
-`--tag-suffix`，同一天第二次构建会覆盖第一次。）
+镜像 tag 固定为 `<arch>_<YYYYMMDD>`；版本和提交记录在 OCI label 中。
+构建机不执行 Git：本地取得提交后，rsync 代码，并显式传入 `PHOTOCRAFT_BUILD_SHA`。
+`package.sh` 与 `audit-package.sh` 同时兼容先前含提交后缀的镜像，便于回滚。
 
 ## 打包（本地调试用）
 
@@ -55,3 +55,9 @@ ictrek.app/UPSTREAM.yml                    ← core / ref / fork_build（供 CI 
 - 设计记录：`plan/vos-integration.md`（本地，gitignored）
 - 仓库内文档：`docs/vos-integration.md`
 - VOS 联调：仓库根的 `make vos-dev`
+
+### 导出成品到 AI 相册
+
+保存和导出都可下载到本机或写入 VOS。PNG、JPEG、WebP 成品还可选择“导出成品图片到 AI 相册”。
+上传复用当前用户会话，核验相册中的图片记录后再提示成功；原图保留。
+PSD / PCraft 工程保存到本机或 VOS。异步保存失败会明确报错并恢复未保存状态，便于重试。

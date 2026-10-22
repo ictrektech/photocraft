@@ -207,6 +207,11 @@ impl Picker {
     /// 进入 `adapter` 的默认目录（[`ASSETS_DIR`]）。它不存在时由 [`Self::enter_failed`]
     /// 记下要建它。
     pub fn enter_default(&mut self, adapter: &str) {
+        if adapter.starts_with("x_") {
+            self.want_default = false;
+            self.enter(&FinderPath::root(adapter).api_path());
+            return;
+        }
         let dir = FinderPath::root(adapter).child(ASSETS_DIR);
         self.want_default = true;
         self.enter(&dir);
@@ -399,7 +404,7 @@ mod tests {
     }
 
     fn volume(uuid: &str, name: &str) -> Volume {
-        Volume { uuid: uuid.into(), nick_name: None, name: name.into() }
+        Volume { uuid: uuid.into(), adapter: None, nick_name: None, name: name.into() }
     }
 
     fn open_picker() -> Picker {
@@ -640,7 +645,7 @@ mod tests {
     #[test]
     fn a_save_name_cannot_escape_the_directory() {
         let mut p = Picker::new(Mode::Save, Vec::new(), Some("art.psd"));
-        p.set_volumes(vec![crate::vos::model::Volume { uuid: "v1".into(), nick_name: None, name: "Space".into() }]);
+        p.set_volumes(vec![crate::vos::model::Volume { uuid: "v1".into(), adapter: None, nick_name: None, name: "Space".into() }]);
         p.enter("v_v1://assets-psd");
         // `TextEdit` 直接写这个字符串，不做过滤。
         *p.file_name_mut() = "../../etc/passwd".into();

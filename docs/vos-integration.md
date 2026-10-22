@@ -297,24 +297,10 @@ upstream *provenance* readable in `UPSTREAM.yml` / the OCI label without claimin
 differ only in their metadata, so each release still bumps `-vos.<n>`. The metadata never reaches a
 Docker tag, which is a second reason the tag says nothing about the version at all.
 
-**Image tags** follow the VAI convention (`../vai/apps/nowen-video/build_image.sh`): one tag,
-`<arch>_<YYYYMMDD>_<short sha>` (optionally `-r<N>` for a second build of the same commit the same
-day), which is what Feishu records and both `package.sh` and `audit-package.sh` read (they validate
-it against the same `TAG_RE`).
-
-The version is deliberately not in the tag. It lives in the `org.opencontainers.image.version`
-label, in `ictrek.app/VERSION` and in `ictrek.app/UPSTREAM.yml`, and the upstream base additionally
-in the `com.ictrek.photocraft.upstream` label — which is also why the metadata above needs no tag of
-its own.
-
-A second `<version>-<arch>` tag used to be pushed as a "human-readable" alias. It was dropped: no
-script referenced it, `TAG_RE` rejects that form, and since it did not carry `--tag-suffix` a second
-build of the same day overwrote the first, so the by-version tag could not be pulled for both. Pull
-the recorded tag instead:
-
-```bash
-docker pull swr.cn-southwest-2.myhuaweicloud.com/ictrek/photocraft-web:amd_20261014_5923bed5d
-```
+**Image tags** are fixed `<arch>_<YYYYMMDD>`. Version and revision remain in OCI labels.
+Set `PHOTOCRAFT_BUILD_SHA` from the local checkout and rsync it before invoking `docker/build_image.sh`
+on the matching build host. Build hosts never run Git. Package validation also accepts prior SHA-suffixed
+references so existing packages remain auditable and rollback-compatible.
 
 **Cutting a release:** build and record both architectures with `docker/build_image.sh`, then
 `make vos-release`, which commits `VERSION` + `UPSTREAM.yml`, tags `vos-photocraft-v<version>` and
@@ -442,32 +428,29 @@ is not called back yet: saving a new version into image-studio's gallery is the 
 
 ### Where a document lands, and the one row the picker needs
 
-Nothing is stored by this app: a saved document goes straight back through
-`POST /v1000/finder_next/upload` to the platform backend, which writes it to
+The app has no private document store. VOS saves write directly into the directory selected
+from the application's data-access grants, so uninstalling or upgrading PhotoCraft preserves them.
+Existing personal-volume Finder paths still map to `{mount_point}/users/{username}/data/...`.
 
-```text
-{mount_point}/users/{username}/data/<subdir>/<name>.psd
-```
+The picker now reads the directories granted in **VOS App management → Data access authorization**.
+The platform mounts `${VOS_APP_EXPOSED_PATH}` at `/exposed` with `rslave` propagation.
+A small Rust storage service in the web image authenticates every request against the configured
+`VOS_OIDC_USERINFO_URL`, then lists public and current-user `users/<username>/data` anchors.
+Filesystem resolution rejects traversal and symlinks leaving an authorized root. Read-only mounts
+remain read-only. Files are written atomically beside the destination, without an app-private copy.
+No user-volume grant is required; admin follows the same authorization boundary as other apps.
+Legacy Finder paths remain readable for existing recent documents and `?open=` links.
 
-i.e. `/share/<volume_uuid>/users/<username>/data/…` with the default layout. So uninstall,
-upgrade or a container restart never touches it, it shows up in the platform's own 文件服务, and
-it counts against that user's per-volume quota. The image has no volume of its own — it is nginx
-serving static files — so there is nothing local to lose.
+**File → Open** preserves the browser picker and adds separate VOS and AI Album choices. Command-specific
+extension and multiple-selection options are preserved. Save offers this computer or VOS.
+AI Album uses its existing `/api/oauth/fastpath` endpoint with an AI Album audience token obtained through its registered public PKCE client and the current VOS bridge session, then
+queries image metadata/thumbnails and downloads the selected original using an in-memory album session.
+There are no shared admin credentials, saved API keys or new album authentication bypasses.
+An image opens as an editable copy, preserving the album original. Album access errors are shown with retry.
 
-The picker lists volumes from `POST /v1000/nas/users/volumes/list`, which reads the
-`vos_nas_user_volume` join table. **That table is what actually gates the feature**: with no row,
-every user gets `total: 0`, and every Finder call answers `10045 无效的文件访问入口` — note that on
-this box `10045` means "no volume share yet", not "no permission". Grant one as an administrator
-(system_admin / storage_admin, idempotent):
-
-```sh
-curl -sk https://127.0.0.1:1180/v1000/nas/volumes/shares/create \
-  -H 'Authorization: Bearer <admin token>' -H 'Content-Type: application/json' \
-  -d '{"volume_uuid":"<uuid>","user_ids":["<user id>"]}'
-```
-
-`POST /v1000/nas/volumes/user-directory` then reports the `data_path` that uploads will use,
-which is the quickest way to confirm the share took effect.
+The VOS bridge is subscribed to `locale-change` before reading `getState()`. A revision guard prevents
+an old snapshot from overriding a newer event. The subscription retries while the bridge is being
+injected. Changes update `interface.language` and request the matching served fonts before the next UI frame.
 
 ### The Home screen
 
@@ -562,3 +545,11 @@ picker transitions, the recent list). `cargo test -p photocraft-ui-egui --lib ca
 covers the Home-screen seam (`the_home_screen_lists_platform_files_and_routes_their_clicks`).
 The browser modules are compile-checked by `cargo xtask wasm`.
 
+
+### Export finished images to AI Album
+
+Save and Export retain browser download and VOS destinations. For PNG, JPEG and WebP output,
+the destination chooser also offers **Export image to AI Album**. The same user session uploads
+the encoded result, checks the returned asset through the album API, and only then confirms success.
+Original album images are preserved. Layered PSD/PCraft projects stay on this computer or VOS.
+Failed asynchronous saves report the failure and restore the document's unsaved state so it can be retried.

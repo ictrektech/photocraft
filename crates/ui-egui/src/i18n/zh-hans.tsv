@@ -2831,3 +2831,17 @@ curves	Smooth	平滑
 	Move ‘{name}’ to the Recycle Bin?	将“{name}”移到回收站？
 	You can restore it from the VOS Recycle Bin.	你可以从 VOS 回收站恢复它。
 	VOS Recycle Bin	VOS 回收站
+
+# VOS file access
+	Open from VOS	从 VOS 打开
+	Save to VOS	保存到 VOS
+	Choose a storage space	选择授权目录
+	VOS storage	VOS 存储
+	Browse VOS storage…	浏览 VOS 存储…
+	Up	上一级
+	Refresh	刷新
+	This folder is empty	此文件夹为空
+	Loading…	正在加载…
+	File name	文件名
+	Retry	重试
+	New name	新名称

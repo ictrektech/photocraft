@@ -13,7 +13,7 @@
 //! 本模块刻意不碰 web_sys，因此能在宿主机的测试里跑。
 
 /// 平台的 `parse_adapter` 接受的 scheme 前缀。
-const ADAPTER_PREFIXES: &[&str] = &["v", "vr", "p", "pr", "s", "d"];
+const ADAPTER_PREFIXES: &[&str] = &["v", "vr", "p", "pr", "s", "d", "x"];
 
 /// 当 `raw` 确实是 Finder 路径时，把它拆成 adapter 和 `:/` 之后的部分。
 fn adapter_and_rest(raw: &str) -> Option<(&str, &str)> {
@@ -141,7 +141,7 @@ mod tests {
         assert_eq!(FinderPath::parse_dir("https://example.com/a.psd"), None);
         assert_eq!(FinderPath::parse_dir("://x"), None);
         assert_eq!(FinderPath::parse_dir("v_://x"), None);
-        assert_eq!(FinderPath::parse_dir("x_abc://pics"), None);
+        assert_eq!(FinderPath::parse_dir("unknown_abc://pics"), None);
     }
 
     #[test]

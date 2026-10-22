@@ -20,7 +20,7 @@ const CLIENT_ID: &str = "com.ictrek.photocraft";
 
 /// manifest 授予本客户端的范围：`openid` 用于登录，`read` 用于 Finder。访问令牌有效期一小
 /// 时，平台拒绝它时 [`renew`] 会重新登录。
-const SCOPE: &str = "openid read";
+const SCOPE: &str = "openid profile email";
 /// 令牌缓存的位置：按标签页，关闭标签页即清（fastpath 指南的建议）。
 const TOKEN_KEY: &str = "photocraft.vos.access_token";
 
@@ -92,7 +92,7 @@ fn set(object: &js_sys::Object, key: &str, value: &JsValue) -> Result<(), String
 ///
 /// `crypto.getRandomValues` 在任何上下文都能用（只有 `crypto.subtle` 需要 HTTPS），所以 verifier
 /// 仍是浏览器的 CSPRNG；对它求摘要是 Rust 做的部分。
-fn random_b64url(bytes: usize) -> Result<String, String> {
+pub(super) fn random_b64url(bytes: usize) -> Result<String, String> {
     let crypto = web_sys::window().ok_or("no window")?.crypto().map_err(|e| describe(&e))?;
     let mut buf = vec![0u8; bytes];
     crypto.get_random_values_with_u8_array(&mut buf).map_err(|e| describe(&e))?;
@@ -132,11 +132,23 @@ async fn authorized(verifier: &str) -> Result<String, String> {
     if let Some(token) = cached_token() {
         return Ok(token);
     }
+    let token = authorize_client(CLIENT_ID, verifier).await?;
+    cache_token(&token);
+    Ok(token)
+}
+
+/// AI Album is a registered public PKCE client. Obtain its audience-bound token through
+/// the same VOS user session; no shared credential or broader album API key is needed.
+pub async fn album_token() -> Result<String, String> {
+    authorize_client("com.ictrek.ai-album", &random_b64url(32)?).await
+}
+
+async fn authorize_client(client_id: &str, verifier: &str) -> Result<String, String> {
     let state = random_b64url(16)?;
     let authorize = js_sys::Object::new();
-    set(&authorize, "client_id", &JsValue::from_str(CLIENT_ID))?;
+    set(&authorize, "client_id", &JsValue::from_str(client_id))?;
     set(&authorize, "response_type", &JsValue::from_str("code"))?;
-    set(&authorize, "scope", &JsValue::from_str(SCOPE))?;
+    set(&authorize, "scope", &JsValue::from_str(if client_id == CLIENT_ID { SCOPE } else { "openid profile email" }))?;
     set(&authorize, "state", &JsValue::from_str(&state))?;
     // S256：base64url(SHA-256(verifier))，本地计算，这样纯 http 页面也能登录。
     let challenge = super::crypto::b64url(&super::crypto::digest(verifier.as_bytes()));
@@ -149,19 +161,18 @@ async fn authorized(verifier: &str) -> Result<String, String> {
     if returned.as_deref() != Some(state.as_str()) {
         return Err("VOS sign-in returned a mismatched state".into());
     }
-    exchange(&code, verifier).await
+    exchange(client_id, &code, verifier).await
 }
 
 /// 用授权码换访问令牌（并存下来）。
-async fn exchange(code: &str, verifier: &str) -> Result<String, String> {
+async fn exchange(client_id: &str, code: &str, verifier: &str) -> Result<String, String> {
     let request = js_sys::Object::new();
     set(&request, "grant_type", &JsValue::from_str("authorization_code"))?;
     set(&request, "code", &JsValue::from_str(code))?;
-    set(&request, "client_id", &JsValue::from_str(CLIENT_ID))?;
+    set(&request, "client_id", &JsValue::from_str(client_id))?;
     set(&request, "code_verifier", &JsValue::from_str(verifier))?;
     let promise = call(&oauth2()?, "token", &request)?;
     let answer = JsFuture::from(promise).await.map_err(|e| format!("VOS token exchange failed: {}", describe(&e)))?;
     let token = get(&answer, "access_token")?.as_string().filter(|t| !t.is_empty()).ok_or("VOS returned no access token")?;
-    cache_token(&token);
     Ok(token)
 }

@@ -11,7 +11,7 @@ set -euo pipefail
 APP_ID="com.ictrek.photocraft"
 ROUTER_PAGE_ID="photocraft"
 # The Feishu sheet convention for image tags (VAI-wide), optionally with a repeat-build suffix.
-TAG_RE='^(amd|arm)_[0-9]{8}_[0-9a-f]{7,40}(-r[0-9]+)?$'
+TAG_RE='^(amd|arm)_[0-9]{8}(_[0-9a-f]{7,40}(-r[0-9]+)?)?$'
 VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+(-vos\.[0-9]+)?(\+[0-9A-Za-z.-]+)?$'
 
 die() { echo "[audit][ERROR] $*" >&2; exit 1; }

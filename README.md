@@ -448,3 +448,18 @@ Forks and modified versions must remove them.
 ## Star history
 
 [![Star History Chart](https://api.star-history.com/svg?repos=storytold/photocraft&type=Date&legend=top-left)](https://www.star-history.com/?repos=storytold%2Fphotocraft&type=date&legend=top-left)
+
+## VOS integration
+
+The VOS build offers **Open from this computer**, **Open from VOS**, and **Choose from AI Album**.
+VOS storage uses App management → Data access authorization, with server-side VOS identity checks and current-user directory isolation.
+AI Album reuses VOS login; edited images can be saved as copies to this computer or VOS. The album original is preserved.
+The interface follows live VOS language changes. See [VOS integration](docs/vos-integration.md) and [deployment](ictrek.app/README.md).
+
+### Export finished images to AI Album
+
+Save and Export retain browser download and VOS destinations. For PNG, JPEG and WebP output,
+the destination chooser also offers **Export image to AI Album**. The same user session uploads
+the encoded result, checks the returned asset through the album API, and only then confirms success.
+Original album images are preserved. Layered PSD/PCraft projects stay on this computer or VOS.
+Failed asynchronous saves report the failure and restore the document's unsaved state so it can be retried.

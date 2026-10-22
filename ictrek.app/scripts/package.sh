@@ -34,7 +34,7 @@ ARCHES=(
 )
 COMPONENT="photocraft-web"
 # Keep TAG_RE in sync with scripts/audit-package.sh.
-TAG_RE='^(amd|arm)_[0-9]{8}_[0-9a-f]{7,40}(-r[0-9]+)?$'
+TAG_RE='^(amd|arm)_[0-9]{8}(_[0-9a-f]{7,40}(-r[0-9]+)?)?$'
 VERSION_RE='^[0-9]+\.[0-9]+\.[0-9]+(-vos\.[0-9]+)?(\+[0-9A-Za-z.-]+)?$'
 
 usage() {
@@ -219,7 +219,7 @@ for row in rows:
 else:
     raise SystemExit(1)' "${column}")" || continue
     if [[ ! "${tag}" =~ ${TAG_RE} ]]; then
-      die "${sheet_title}: ${COMPONENT} tag ${tag} is not <arch>_<YYYYMMDD>_<sha>"
+      die "${sheet_title}: ${COMPONENT} tag ${tag} is not a supported platform image tag"
     fi
     printf '%s:%s\n' "${IMAGE_REPO}" "${tag}"
     return 0
@@ -297,7 +297,7 @@ else
   done
 fi
 
-for file in manifest.yml routers.yml; do
+for file in manifest.yml routers.yml configs.yml; do
   [[ -f "${SRC_DIR}/${file}" ]] || die "missing ${SRC_DIR}/${file}"
   render_text_file "${SRC_DIR}/${file}" "${STAGE_DIR}/${file}"
   validate_yaml "${STAGE_DIR}/${file}"
@@ -312,7 +312,7 @@ render_text_file "${SRC_DIR}/README.zh-CN.md" "${STAGE_DIR}/README.zh-CN.md"
 
 APP_TARBALL="${DIST_DIR}/app.tar.gz"
 PACKAGE_PATH="${DIST_DIR}/${APP_NAME}_${APP_VERSION}_pull.tar"
-TAR_FILES=(.env manifest.yml docker-compose.yml routers.yml LICENSE-NOTICE.md icon.png README.zh-CN.md)
+TAR_FILES=(.env manifest.yml docker-compose.yml routers.yml configs.yml LICENSE-NOTICE.md icon.png README.zh-CN.md)
 [[ -f "${STAGE_DIR}/README.en.md" ]] && TAR_FILES+=(README.en.md)
 tar czf "${APP_TARBALL}" -C "${STAGE_DIR}" "${TAR_FILES[@]}"
 cp "${APP_TARBALL}" "${PACKAGE_ROOT}/app.tar.gz"

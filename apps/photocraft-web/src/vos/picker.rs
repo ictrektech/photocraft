@@ -192,7 +192,13 @@ fn body(ui: &mut Ui, picker: &mut Picker, busy: bool) -> Action {
             });
             egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
                 if picker.volumes().is_empty() {
-                    ui.label(RichText::new(i18n::t("No storage space is available")).color(tokens.text_dim));
+                    ui.label(
+                        RichText::new(super::sources_text(
+                            "No directories are authorized. Grant data access to PhotoCraft in VOS App settings, then refresh.",
+                            "尚未授权目录。请在 VOS 应用设置中为 PhotoCraft 添加数据访问授权，然后刷新。",
+                        ))
+                        .color(tokens.text_dim),
+                    );
                 }
                 // `enter_default` 需要可变借用 `picker`，所以先把点击的结果拷出借用。
                 let clicked = picker.volumes().iter().find(|v| ui.add_enabled(!busy, egui::Button::new(v.label())).clicked()).map(|v| v.adapter());
@@ -216,7 +222,7 @@ fn body(ui: &mut Ui, picker: &mut Picker, busy: bool) -> Action {
                         let button = egui::Button::new(name).selected(!entry.is_dir() && picker.is_selected(&entry.path)).min_size(egui::vec2(240.0, 0.0));
                         let response = ui.add_enabled(!busy, button);
                         // 目录没有可删的文件，所以菜单只给文件。
-                        if !entry.is_dir() {
+                        if !entry.is_dir() && !entry.storage.starts_with("x_") {
                             response.context_menu(|ui| {
                                 ui.set_min_width(180.0);
                                 if ui.add_enabled(!busy, egui::Button::new(i18n::t("Rename"))).clicked() {
@@ -331,7 +337,7 @@ mod tests {
         use egui_kittest::Harness;
 
         let picker = std::cell::RefCell::new(super::Picker::new(Mode::Save, Vec::new(), Some("Untitled-1.psd")));
-        picker.borrow_mut().set_volumes(vec![crate::vos::model::Volume { uuid: "v1".into(), nick_name: None, name: "Space".into() }]);
+        picker.borrow_mut().set_volumes(vec![crate::vos::model::Volume { uuid: "v1".into(), adapter: None, nick_name: None, name: "Space".into() }]);
         let actions = std::cell::RefCell::new(Vec::new());
         picker.borrow_mut().set_theme(photocraft_ui_egui::theme::ThemeKind::ProMedium);
         let mut h = Harness::builder().with_size(egui::vec2(640.0, 460.0)).build_ui(|ui| {
@@ -430,7 +436,7 @@ mod tests {
         use egui_kittest::Harness;
 
         let picker = std::cell::RefCell::new(super::Picker::new(Mode::Save, Vec::new(), Some("art.psd")));
-        picker.borrow_mut().set_volumes(vec![crate::vos::model::Volume { uuid: "v1".into(), nick_name: None, name: "Space".into() }]);
+        picker.borrow_mut().set_volumes(vec![crate::vos::model::Volume { uuid: "v1".into(), adapter: None, nick_name: None, name: "Space".into() }]);
         let mut h = Harness::builder().with_size(egui::vec2(640.0, 460.0)).build_ui(|ui| {
             let mut picker = picker.borrow_mut();
             let _ = super::show(ui.ctx(), &mut picker, false);
@@ -448,7 +454,7 @@ mod tests {
         use egui_kittest::Harness;
 
         let picker = std::cell::RefCell::new(super::Picker::new(Mode::Save, Vec::new(), Some("art.psd")));
-        picker.borrow_mut().set_volumes(vec![crate::vos::model::Volume { uuid: "v1".into(), nick_name: None, name: "Space".into() }]);
+        picker.borrow_mut().set_volumes(vec![crate::vos::model::Volume { uuid: "v1".into(), adapter: None, nick_name: None, name: "Space".into() }]);
         let actions = std::cell::RefCell::new(Vec::new());
         // `busy = true`
         let mut h = Harness::builder().with_size(egui::vec2(640.0, 460.0)).build_ui(|ui| {
@@ -496,7 +502,12 @@ mod tests {
             let picker = std::cell::RefCell::new(super::Picker::new(Mode::Open { multiple: false }, Vec::new(), None));
             {
                 let mut p = picker.borrow_mut();
-                p.set_volumes(vec![crate::vos::model::Volume { uuid: adapter.into(), nick_name: Some("vos_workspace".into()), name: adapter.into() }]);
+                p.set_volumes(vec![crate::vos::model::Volume {
+                    uuid: adapter.into(),
+                    adapter: None,
+                    nick_name: Some("vos_workspace".into()),
+                    name: adapter.into(),
+                }]);
                 p.enter_default(adapter);
                 match (fail, files) {
                     (Some(message), _) => p.fail(message),
@@ -566,7 +577,12 @@ mod tests {
             let picker = std::cell::RefCell::new(super::Picker::new(mode, Vec::new(), suggested));
             {
                 let mut p = picker.borrow_mut();
-                p.set_volumes(vec![crate::vos::model::Volume { uuid: adapter.into(), nick_name: Some("vos_workspace".into()), name: adapter.into() }]);
+                p.set_volumes(vec![crate::vos::model::Volume {
+                    uuid: adapter.into(),
+                    adapter: None,
+                    nick_name: Some("vos_workspace".into()),
+                    name: adapter.into(),
+                }]);
                 p.enter_default(adapter);
                 match fill {
                     Some(name) if name.ends_with(".psd") => p.set_entries(files.clone()),
@@ -601,7 +617,7 @@ mod tests {
         {
             let mut p = picker.borrow_mut();
             p.set_theme(photocraft_ui_egui::theme::ThemeKind::ProMedium);
-            p.set_volumes(vec![crate::vos::model::Volume { uuid: adapter.into(), nick_name: None, name: adapter.into() }]);
+            p.set_volumes(vec![crate::vos::model::Volume { uuid: adapter.into(), adapter: None, nick_name: None, name: adapter.into() }]);
             p.enter_default(adapter);
             p.set_entries(vec![crate::vos::model::Entry {
                 kind: "file".into(),
@@ -690,7 +706,7 @@ mod tests {
         {
             let mut p = picker.borrow_mut();
             p.set_theme(photocraft_ui_egui::theme::ThemeKind::ProMedium);
-            p.set_volumes(vec![crate::vos::model::Volume { uuid: adapter.into(), nick_name: None, name: adapter.into() }]);
+            p.set_volumes(vec![crate::vos::model::Volume { uuid: adapter.into(), adapter: None, nick_name: None, name: adapter.into() }]);
             p.enter_default(adapter);
             p.set_entries(vec![
                 crate::vos::model::Entry {
@@ -750,7 +766,7 @@ mod tests {
         use egui_kittest::Harness;
 
         let picker = std::cell::RefCell::new(super::Picker::new(Mode::Save, Vec::new(), Some("Untitled-1.psd")));
-        picker.borrow_mut().set_volumes(vec![crate::vos::model::Volume { uuid: "v1".into(), nick_name: None, name: "Space".into() }]);
+        picker.borrow_mut().set_volumes(vec![crate::vos::model::Volume { uuid: "v1".into(), adapter: None, nick_name: None, name: "Space".into() }]);
         let mut h = Harness::builder().with_size(egui::vec2(640.0, 460.0)).build_ui(|ui| {
             let mut picker = picker.borrow_mut();
             super::super::install::own_keyboard(ui.ctx());
