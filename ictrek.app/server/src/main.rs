@@ -22,6 +22,7 @@ struct App {
     userinfo: String,
     client: reqwest::Client,
 }
+#[derive(Debug)]
 struct Error(StatusCode, &'static str);
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
@@ -237,6 +238,62 @@ async fn new_folder(State(app): State<App>, headers: HeaderMap, Json(q): Json<Mu
     std::fs::create_dir(path).map_err(io)?;
     Ok(ok(json!("created")))
 }
+// Like Image Studio, exchange credentials through the internal VOS gateway. A full user
+// session is needed here for selecting originals; upload-only API keys cannot list images.
+#[derive(Deserialize)]
+struct AlbumSession {
+    origin: String,
+}
+fn album_origin(origin: &str, host: &str, external_port: u16) -> Result<String> {
+    let mut url = reqwest::Url::parse(origin).map_err(|_| Error(StatusCode::BAD_REQUEST, "Invalid VOS origin"))?;
+    let expected = reqwest::Url::parse(&format!("http://{host}")).map_err(|_| Error(StatusCode::BAD_REQUEST, "Invalid VOS host"))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str() != expected.host_str()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(Error(StatusCode::BAD_REQUEST, "Invalid VOS origin"));
+    }
+    if url.scheme() == "http" {
+        url.set_scheme("https").map_err(|_| Error(StatusCode::BAD_REQUEST, "Invalid VOS origin"))?;
+        url.set_port(Some(external_port)).map_err(|_| Error(StatusCode::BAD_REQUEST, "Invalid VOS port"))?;
+    }
+    Ok(url.origin().ascii_serialization())
+}
+async fn album_session(State(app): State<App>, headers: HeaderMap, Json(q): Json<AlbumSession>) -> Result<Json<Value>> {
+    identity(&app, &headers).await?;
+    let host = headers.get("host").and_then(|v| v.to_str().ok()).ok_or(Error(StatusCode::BAD_REQUEST, "Missing VOS host"))?;
+    let external = std::env::var("VOS_API_GW_PORT_EXTERNAL").ok().and_then(|s| s.parse().ok()).unwrap_or(1180);
+    let origin = album_origin(&q.origin, host, external)?;
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(Error(StatusCode::UNAUTHORIZED, "Sign in to VOS"))?;
+    let gateway = std::env::var("VOS_HOST_GW_IP").unwrap_or_else(|_| "172.17.0.1".into());
+    let port = std::env::var("VOS_API_GW_PORT_INTERNAL").ok().and_then(|s| s.parse::<u16>().ok()).unwrap_or(1182);
+    let response = app
+        .client
+        .post(format!("http://{gateway}:{port}/app/com.ictrek.ai-album/api/oauth/fastpath"))
+        .json(&json!({"accessToken":token,"origin":origin}))
+        .send()
+        .await
+        .map_err(|_| Error(StatusCode::BAD_GATEWAY, "AI Album is unavailable"))?;
+    if !response.status().is_success() {
+        return Err(Error(
+            if response.status().as_u16() == 401 { StatusCode::UNAUTHORIZED } else { StatusCode::BAD_GATEWAY },
+            "AI Album could not authorize the current VOS account",
+        ));
+    }
+    let value: Value = response.json().await.map_err(|_| Error(StatusCode::BAD_GATEWAY, "Invalid AI Album session"))?;
+    if value["accessToken"].as_str().is_none_or(str::is_empty) {
+        return Err(Error(StatusCode::BAD_GATEWAY, "AI Album returned no session"));
+    }
+    Ok(Json(value))
+}
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let app = App {
@@ -245,6 +302,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         client: reqwest::Client::builder().timeout(std::time::Duration::from_secs(15)).redirect(reqwest::redirect::Policy::none()).build()?,
     };
     let router = Router::new()
+        .route("/album/session", post(album_session))
         .route("/volumes", get(volumes))
         .route("/index", get(index))
         .route("/download", get(download))
@@ -259,6 +317,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn album_origin_uses_platform_https_and_rejects_other_hosts() {
+        assert_eq!(album_origin("http://box.test:1182", "box.test:1182", 1180).unwrap(), "https://box.test:1180");
+        assert_eq!(album_origin("https://box.test", "box.test", 1180).unwrap(), "https://box.test");
+        for origin in ["https://other.test", "https://user@box.test", "https://box.test/path", "https://box.test?x=1", "file:///etc/passwd"] {
+            assert!(album_origin(origin, "box.test", 1180).is_err());
+        }
+    }
     #[test]
     fn roots_isolate_users_and_stop_at_grants() {
         let tmp = tempfile::tempdir().unwrap();

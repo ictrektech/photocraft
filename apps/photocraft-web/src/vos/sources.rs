@@ -69,7 +69,11 @@ async fn request(method: &str, url: &str, token: Option<&str>, body: Option<Stri
         if response.status() == 401 {
             STATE.with(|s| s.borrow_mut().token = None);
         }
-        return Err(format!("AI Album request failed (HTTP {}); check that AI Album is installed and VOS login is enabled", response.status()));
+        return Err(format!(
+            "{} (HTTP {})",
+            text("AI Album request failed. Retry or check the app status.", "AI 相册请求失败，请重试或检查应用状态。"),
+            response.status()
+        ));
     }
     Ok(response)
 }
@@ -84,7 +88,7 @@ async fn session() -> Result<String, String> {
     let token = bridge::album_token().await?;
     let origin = web_sys::window().ok_or("No browser window")?.location().origin().map_err(|_| "No VOS origin")?;
     let value =
-        json(request("POST", &format!("{API}/oauth/fastpath"), None, Some(serde_json::json!({"accessToken":token,"origin":origin}).to_string())).await?)
+        json(request("POST", "/app/com.ictrek.photocraft/storage/album/session", Some(&token), Some(serde_json::json!({"origin":origin}).to_string())).await?)
             .await?;
     let token = value["accessToken"].as_str().filter(|v| !v.is_empty()).ok_or("AI Album returned no session")?.to_owned();
     STATE.with(|s| s.borrow_mut().token = Some(token.clone()));
@@ -268,6 +272,7 @@ pub fn ui(ctx: &egui::Context) {
                 if loading {
                     ui.spinner();
                 }
+                let failed = error.is_some();
                 if let Some(error) = error {
                     ui.label(error);
                     if ui.button(text("Retry", "重试")).clicked() {
@@ -275,7 +280,7 @@ pub fn ui(ctx: &egui::Context) {
                     }
                 }
                 egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                    if items.is_empty() && !loading {
+                    if items.is_empty() && !loading && !failed {
                         ui.label(text("No images in this account", "当前账户没有图片"));
                     }
                     for asset in items {

@@ -7,6 +7,9 @@
 x-photocraft-web: &photocraft-web
   restart: unless-stopped
   environment:
+    VOS_HOST_GW_IP: ${VOS_HOST_GW_IP:-172.17.0.1}
+    VOS_API_GW_PORT_INTERNAL: ${VOS_API_GW_PORT_INTERNAL:-1182}
+    VOS_API_GW_PORT_EXTERNAL: ${VOS_API_GW_PORT_EXTERNAL:-1180}
     VOS_OIDC_USERINFO_URL: ${VOS_OIDC_USERINFO_URL:-http://172.17.0.1:8105/v1000/oauth2/userinfo}
   volumes:
     - ${VOS_APP_EXPOSED_PATH:-/nonexistent}:/exposed:rslave
