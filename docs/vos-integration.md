@@ -96,15 +96,88 @@ Two things need GitHub, and neither is reachable from the build network, so both
 Everything else (Rust, trunk, wasm-bindgen-cli, crates.io) goes through the Tsinghua mirrors.
 `GITHUB_ACCELERATOR` is part of the tag, so switching accelerator produces a new tag and a rebuild.
 
+## Agent access (MCP)
+
+The web build is a static wasm page, so an agent cannot drive it. The container already runs a
+native process for the file bridge (`photocraft-storage`), and that process now also speaks MCP over
+Streamable HTTP, using the same `PhotocraftMcp` the desktop app exposes on stdio — one tool
+definition, two transports.
+
+| Item | Value |
+|---|---|
+| Endpoint (internal, from another app) | `http://${VOS_HOST_GW_IP}:${VOS_API_GW_PORT_INTERNAL}/app/com.ictrek.photocraft/storage/mcp` |
+| Endpoint (public) | `https://<host>/app/com.ictrek.photocraft/storage/mcp` |
+| Auth | `Authorization: Bearer <user token>`, verified through `VOS_OIDC_USERINFO_URL` |
+| Usage guidance | the `initialize` response's `instructions` field |
+| Disable | `PHOTOCRAFT_MCP=0` (the route is then not registered at all) |
+
+**What it exposes.** 19 of the desktop server's 25 tools work headlessly: document open/new/place,
+`command_run`/`command_batch` over the full engine command set, preview, save/export, layered and
+data-set export, jobs. The six `ui_*`/`control_call` tools target a desktop window and answer
+`no backend`; the initialize instructions say so.
+
+**Identity.** Every request is attributed to the user whose bearer token it carries; the token is
+never trusted from a query parameter. The verdict comes from `VOS_OIDC_USERINFO_URL`, and its `sub`
+must be a 32-character user id. The platform's application context token — the permanent admin
+credential it issues to the app itself — puts the *application* id in `sub`/`preferred_username`, so
+it is refused with `403 application token not allowed` instead of acting as a user. A userinfo
+outage (5xx) is reported as `502`, not as an expired session, so clients do not re-authenticate in a
+loop. The workspace is the caller's own `users/<username>/data` grant, opened with `cap-std`, so
+tool paths cannot leave it.
+
+**Continuity.** One MCP session keeps one `Headless`, so an agent's second call sees the first
+call's document. This depends on the client negotiating a protocol version that still has sessions:
+rmcp serves `2026-07-28` statelessly (SEP-2567), and a document would not survive between calls.
+Resident workspaces are capped (`PHOTOCRAFT_MCP_MAX_USERS`, default 8) and idle ones are dropped
+after `PHOTOCRAFT_MCP_IDLE_SECS` (default 1800). Age is measured by the last request, not by the
+session table: rmcp removes a session only on an explicit close, so a client that disconnects
+without one would otherwise pin memory for the life of the process. Under capacity pressure only a
+workspace with no live MCP session is recycled; when every resident workspace is in use the request
+gets `429 All agent workspaces are in use` instead of aborting another agent's edit.
+
+**Not provided.** Image generation (there is no ML runtime — `docs/gaps.md` G15), and control of a
+document open in someone's browser. The agent edits a server-side document; the user opens the
+result from the file bridge, or continues it in the web editor.
+
+**Configuration** (all optional): `PHOTOCRAFT_MCP`, `PHOTOCRAFT_MCP_MAX_USERS`,
+`PHOTOCRAFT_MCP_IDLE_SECS`, `PHOTOCRAFT_MCP_MAX_REQUEST_BYTES` (default 1 MiB),
+`PHOTOCRAFT_MCP_ALLOWED_HOSTS` (comma separated; empty disables rmcp's Host check, which is the
+right default behind Traefik), `PHOTOCRAFT_IDENTITY_TTL_SECS` (userinfo cache),
+`PHOTOCRAFT_BIND_ADDR` (default `0.0.0.0`, what the container binds), `PHOTOCRAFT_STORAGE_PORT`
+(default 8081, nginx's upstream).
+
 ## Local development inside the platform
 
 ```bash
-make vos-dev                 # nginx fronting the dev build on 38093 + a temporary Traefik route
-VOS_DEV_WEB=2 make vos-dev   # trunk dev server only, no container, on 38092
-VOS_DEV_WEB=0 make vos-dev   # fidelity mode: dist/web through the VOS image's nginx on 38093
-make vos-dev-status          # mode, port, route, and which copy the platform is serving
-make vos-dev-down            # remove the route and stop everything
+make vos-dev                    # nginx fronting the dev build + the storage/MCP sidecar + route
+VOS_DEV_STORAGE=0 make vos-dev  # UI only: skip the sidecar (faster when only the wasm changed)
+VOS_DEV_WEB=2 make vos-dev      # trunk dev server only, no container, on 38092
+VOS_DEV_WEB=0 make vos-dev      # fidelity mode: dist/web through the VOS image's nginx on 38093
+make vos-dev-status             # mode, port, route, and which copy the platform is serving
+make vos-dev-down               # remove the route and stop everything
 ```
+
+**The storage/MCP sidecar runs by default.** The published image has two processes; trunk builds only
+the wasm one, so `make vos-dev` also builds and supervises `photocraft-storage` on `38094`
+(`VOS_DEV_STORAGE_PORT`), with a file watcher that rebuilds and restarts it when `ictrek.app/server`
+changes. The dev nginx config proxies `/storage/` and `/storage/mcp` to it through
+`host.docker.internal`; it is the same binary and routes the container runs.
+
+A workstation has no VOS identity service, so the sidecar runs with a development identity:
+`PHOTOCRAFT_DEV=1` + `PHOTOCRAFT_DEV_USER=$USER` treat every request as that user, and its workspace
+is `dist/vos-dev/exposed/users/$USER/data`. Both switches are required, a deployed container sets
+neither, and the process prints a warning at startup. `VOS_DEV_USER` picks another name;
+`VOS_DEV_STORAGE=0` skips the sidecar (then `/storage/` answers 502, as before).
+
+Because that identity trusts every request, the sidecar binds the docker gateway
+(`VOS_DEV_STORAGE_BIND_ADDR`, default `172.17.0.1` — the address the nginx container reaches as
+`host.docker.internal`), not `0.0.0.0`, so it is not reachable from the LAN. Set it explicitly if the
+bridge lives elsewhere; the script refuses to start when the address is not on this host. `make
+vos-dev-down` only stops a sidecar whose working directory is this checkout, so two worktrees on the
+same port do not kill each other.
+
+The agent endpoint is reachable at `http://127.0.0.1:38093/storage/mcp` and, through the platform
+route, `http://172.17.0.1:1182/app/com.ictrek.photocraft/storage/mcp`.
 
 while a dev server is up, the platform's PhotoCraft entry loads your working copy instead of the
 installed app; `X-Photocraft-Dev: 1` on any response from that route says so:
@@ -252,6 +325,35 @@ make vos-audit PKG=ictrek.app/dist/photocraft_0.8.2-vos.1_pull.tar
 
 The package is pull mode: one outer tar containing only `app.tar.gz`, whose `.env` names the two
 registry images. Nothing embeds an image, so the package stays a few kilobytes.
+
+### The storage sidecar is its own cargo workspace
+
+`ictrek.app/server/Cargo.toml` declares an empty `[workspace]`, so `photocraft-storage` is a
+workspace root of its own and never joins the upstream workspace at the repo root. That is
+required, not incidental: the root `Cargo.toml` is an upstream file (`verify-scope.sh` lists it as a
+deviation that has to be hand-merged on every sync rebase), and adopting the sidecar would pull its
+`axum`/`tower`/`rmcp` tree into upstream's lock and union its feature sets with the desktop app's.
+The isolation is also why the sidecar's `target/` holds no `wgpu` or `egui` build at all.
+
+Sharing code still works across the boundary: the manifest reaches the engine with a `path`
+dependency on `crates/automation`, and cargo resolves it normally. Three consequences are easy to
+trip over:
+
+- **No inherited lints.** `[lints] workspace = true` resolves against the *nearest* workspace root,
+  which is this manifest, so it fails with "`workspace.lints` was not defined". The never-crash
+  lints are restated in `[lints.rust]` / `[lints.clippy]` in that manifest instead; the root
+  `clippy.toml` still applies because cargo searches upwards for it.
+- **No inherited profile.** `[profile.dev]` is restated there too, mirroring the root values, so
+  `scripts/vos-dev.sh` does not run the engine at `opt-level = 0` in debug.
+- **A separate CI job.** Nothing else in `vos-ci.yml` compiles this workspace, so the `storage`
+  job runs `cargo clippy --all-targets -- -D warnings` and `cargo test` against its manifest. It is
+  the only place a break surfaces before `docker/Dockerfile.vos` runs on the release branch.
+
+Both manifests ask for `rmcp` with a caret requirement (`"3.5"`), so one resolve graph unifies them
+onto the same release and the VOS server and the desktop stdio server share the protocol
+implementation. Do not pin it exactly (`=3.5.0`): that only breaks the next time
+`crates/automation` raises its requirement, since `=3.5.0` and `^3.6` have no overlap and the sync
+rebase would then fail to resolve.
 
 ## Versioning
 
