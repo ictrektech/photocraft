@@ -12,7 +12,7 @@
 #             and VERSION carries it as SemVer build metadata, +up<core_base>)
 core: "0.10.0"
 repo: storytold/photocraft
-ref: "8407d9ccb125af52944fca9d228383459f94aaef"
-base_sha: "8407d9ccb125af52944fca9d228383459f94aaef"
-fork_build: 3
+ref: "8407d9ccb"
+base_sha: "8407d9ccb"
+fork_build: 4
 core_bumped: false
