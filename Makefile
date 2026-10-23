@@ -18,7 +18,8 @@
 DEFAULT_GOAL := help
 
 .PHONY: help vos-dev vos-dev-down vos-dev-status vos-dev-logs vos-dev-web vos-dev-route-off \
-        vos-package vos-package-release vos-audit vos-scope vos-release
+        vos-package vos-package-release vos-audit vos-scope vos-release \
+        vos-cross-export vos-cross-status
 
 help:
 	@grep -Eh '^[a-zA-Z_.-]+:.*## ' $(MAKEFILE_LIST) | sort | \
@@ -43,6 +44,14 @@ vos-dev-web: ## [VOS] 构建 dist/web（走镜像构建阶段，可选 CRAFT_FON
 
 vos-dev-route-off: ## [VOS] 只撤临时路由（流量切回平台上已安装的应用）
 	scripts/vos-dev.sh route-off
+
+## ---- VOS cross-architecture builds -------------------------------------------------------
+
+vos-cross-export: ## [VOS] 构建完成后：把 dist/web 从刚建好的镜像导出（另一个架构复用）
+	scripts/vos-cross.sh export
+
+vos-cross-status: ## [VOS] 看 dist/web 是否新鲜（stamp 是否等于 HEAD）
+	scripts/vos-cross.sh status
 
 ## ---- VOS packaging ----------------------------------------------------------------------
 

@@ -81,8 +81,27 @@ VERSION="$(tr -d '[:space:]' < "${VERSION_FILE}")"
 [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-vos\.[0-9]+)?(\+[0-9A-Za-z.-]+)?$ ]] \
   || die "invalid ictrek.app/VERSION: ${VERSION}"
 
+# The commit the image was built from. Explicit input wins; otherwise derive it, so a checkout with
+# git needs no environment variable at all. Order:
+#   1. PHOTOCRAFT_BUILD_SHA         the caller's answer, as before
+#   2. the web distribution's stamp  reuse path: the wasm was compiled elsewhere, so that build's
+#                                    commit is the only honest answer (the stamp is checked below)
+#   3. git rev-parse HEAD            a plain checkout
+# A build host fed over rsync has no git, which is why (1) and (2) come first; it only reaches (3)
+# when it has both a .git and no distribution, i.e. it is building the wasm itself.
 GIT_SHA="${PHOTOCRAFT_BUILD_SHA:-}"
-[[ "${GIT_SHA}" =~ ^[0-9a-f]{7,40}$ ]] || die "set PHOTOCRAFT_BUILD_SHA to the verified local checkout commit before syncing to the build host"
+if [[ -z "${GIT_SHA}" && -n "${PHOTOCRAFT_WEB_DIST:-}" && -f "${PHOTOCRAFT_WEB_DIST}/source-revision" ]]; then
+  GIT_SHA="$(tr -d '[:space:]' < "${PHOTOCRAFT_WEB_DIST}/source-revision")"
+  log "revision ${GIT_SHA} (from the web distribution)"
+fi
+if [[ -z "${GIT_SHA}" ]]; then
+  GIT_SHA="$(git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null || true)"
+  [[ -n "${GIT_SHA}" ]] && log "revision ${GIT_SHA} (from git)"
+fi
+[[ "${GIT_SHA}" =~ ^[0-9a-f]{7,40}$ ]] || die "cannot tell which commit this build is from:
+  not a git checkout (a build host fed over rsync has no .git), and no PHOTOCRAFT_WEB_DIST stamp.
+  Pass the commit the tree was copied from:
+      PHOTOCRAFT_BUILD_SHA=<sha> docker/build_image.sh"
 BUILD_DATE="$(date -u +%Y%m%d)"
 BUILD_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 MAIN_TAG="${ARCH}_${BUILD_DATE}"
