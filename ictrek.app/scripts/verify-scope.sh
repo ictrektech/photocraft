@@ -23,6 +23,7 @@ WHITELIST=(
   "ictrek.app/"
   "docker/"
   "scripts/vos-dev.sh"
+  "scripts/vos-cross.sh"
   "scripts/vos-fonts.sh"
   "Makefile"
   ".github/workflows/"
