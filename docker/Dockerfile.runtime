@@ -1,11 +1,15 @@
 # syntax=docker/dockerfile:1
 # Reuse the verified architecture-independent WebAssembly output; compile only the native storage service.
+#
+# The whole tree is copied, not just ictrek.app/server. The sidecar now links photocraft-automation,
+# so cargo resolves path dependencies into crates/ and reads `workspace = true` fields from the root
+# manifest; a partial copy fails with "failed to read /src/crates/automation/Cargo.toml". The build
+# context is small (.dockerignore drops target/, dist/, corpus/, log/, plan/) and no wasm is built in
+# this stage, so this costs a copy rather than a compile.
 ARG TOOLCHAIN_IMAGE
 FROM ${TOOLCHAIN_IMAGE} AS storage
 WORKDIR /src
-COPY ictrek.app/server/ ictrek.app/server/
-COPY ictrek.app/tests/ ictrek.app/tests/
-COPY apps/photocraft-web/src/vos/model.rs apps/photocraft-web/src/vos/path.rs apps/photocraft-web/src/vos/
+COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo test --locked --manifest-path ictrek.app/server/Cargo.toml --release --target-dir /src/target/storage \
