@@ -6,7 +6,7 @@ use rmcp::service::RequestContext;
 
 const DOCUMENT: &str = "photocraft://document";
 const COMMANDS: &str = "photocraft://commands";
-const INSTRUCTIONS: &str = "PhotoCraft image editor. Start with doc_new/doc_open, discover ids and parameter docs with command_list, edit with command_run or command_batch (one history step per command). Inspect with doc_inspect and render_preview; doc_save writes native .pcraft or exports by extension. File paths are relative to the read/write roots granted at launch. ui_inspect/ui_screenshot and other ui_* tools require bridge mode. Read photocraft://document and photocraft://commands for live JSON state.";
+const INSTRUCTIONS: &str = "PhotoCraft image editor. Start with doc_new/doc_open, discover ids and parameter docs with command_list, edit with command_run or command_batch (one history step per command, at most 256 steps). Inspect with doc_inspect and doc_render_preview (default 1024 px, at most 2048). doc_save writes native .pcraft or exports by extension; never overwrite a source file, export under a new name. Long filters, Content-Aware Fill and Photomerge run as background jobs when `wait` is false: poll jobs_list. File paths are relative to the read/write roots granted at launch. ui_* tools and control_call require bridge mode and fail in a headless session. Read photocraft://document and photocraft://commands for live JSON state.";
 
 fn annotated(mut tool: Tool) -> Tool {
     let words = tool.name.replace('_', " ");
@@ -82,5 +82,22 @@ impl ServerHandler for PhotocraftMcp {
         ]}))
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(result.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `instructions` field is the only usage guidance a client receives with `initialize`, so
+    /// the rules agents otherwise get wrong must be in it (they used to live in a separate skill
+    /// document, which nothing loaded).
+    #[test]
+    fn the_initialize_instructions_carry_the_rules_agents_get_wrong() {
+        let info = PhotocraftMcp::headless().get_info();
+        let text = info.instructions.unwrap_or_default();
+        for rule in ["command_batch", "never overwrite", "jobs_list", "bridge mode"] {
+            assert!(text.contains(rule), "`{rule}` missing from: {text}");
+        }
     }
 }
