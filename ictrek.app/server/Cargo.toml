@@ -3,7 +3,43 @@ name = "photocraft-storage"
 version = "0.1.0"
 edition = "2024"
 publish = false
+
+# This crate is its own workspace on purpose: the root `Cargo.toml` belongs to upstream, and
+# `verify-scope.sh` lists it as a deviation the fork has to hand-merge on every sync rebase.
+# Joining the root workspace would put this sidecar's axum/tower/rmcp dependencies into upstream's
+# 800-entry lock and union its feature sets with the desktop app's, for no gain: `path`
+# dependencies below resolve across workspace boundaries anyway.
 [workspace]
+
+# The root `[workspace.lints]` is NOT inherited here -- `[lints] workspace = true` resolves against
+# the nearest workspace root, which is this manifest, so it would fail with "`workspace.lints` was
+# not defined". The rules are therefore restated, at the strength AGENTS.md's never-crash rule asks
+# for: the root workspace only declares `unsafe_code` and leaves the clippy denies to each crate's
+# `#![deny(...)]` in `lib.rs`, which never covered `main.rs`. Declaring them here covers both.
+# `clippy.toml` at the repo root still applies (cargo searches upwards), so the `*-in-tests`
+# allowances keep unit tests able to `unwrap()`.
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+
+# `vos-dev.sh` builds this sidecar in debug, and it pulls in the engine (and therefore the pixel
+# crates) through `photocraft-automation`. Without these the engine would run at opt-level 0 while
+# the desktop app runs its at 1/2; the values mirror the root manifest's dev profile.
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
+
 [dependencies]
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
@@ -11,6 +47,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# `oneshot` drives the router without binding a port in the route tests.
+tower = { version = "0.5", features = ["util"] }
+
 [dev-dependencies]
 tempfile = "3"
 
