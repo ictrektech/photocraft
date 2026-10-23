@@ -54,6 +54,31 @@ jobs:
         run: |
           shellcheck ictrek.app/scripts/*.sh
 
+  # The storage/MCP sidecar is a workspace of its own (ictrek.app/server), so nothing else here
+  # compiles it: without this job a broken dependency resolution or a failing vos-contracts test
+  # would only surface while building the release image (docker/Dockerfile.vos). It also guards the
+  # sidecar's shared-crate link: crates/automation reaches this workspace by `path`, so an upstream
+  # change that this manifest cannot resolve fails here instead of on the release branch.
+  storage:
+    name: storage sidecar build and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: vos-ci-storage
+          # A separate workspace means a separate lock and target directory.
+          workspaces: "ictrek.app/server -> target"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+      - name: Clippy
+        run: cargo clippy --manifest-path ictrek.app/server/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --manifest-path ictrek.app/server/Cargo.toml --locked
+
   web:
     name: web build and wasm size gate
     runs-on: ubuntu-latest
