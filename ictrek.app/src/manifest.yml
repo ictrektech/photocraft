@@ -11,6 +11,36 @@ category: [media, ai]
 icon: icon.png
 arch: [amd64, arm64]
 
+# Agent surface. The codes are what the platform binds to roles; the service itself only checks the
+# caller's identity (a user token), so these are the contract for "which agent may do what" once
+# RBAC for permission codes lands.
+permissions:
+  defines:
+    - code: com.ictrek.photocraft:image:read
+      name:
+        zh-CN: 查看图片
+        en: View images
+      description: 列出授权目录、打开文档、渲染预览
+      default_roles: [platform_admin, normal_user]
+    - code: com.ictrek.photocraft:image:edit
+      name:
+        zh-CN: 编辑图片
+        en: Edit images
+      description: 通过 Agent 或编辑器应用图层、调整、滤镜等编辑
+      default_roles: [platform_admin, normal_user]
+    - code: com.ictrek.photocraft:image:export
+      name:
+        zh-CN: 导出图片
+        en: Export images
+      description: 把编辑结果写入授权目录
+      default_roles: [normal_user]
+    - code: com.ictrek.photocraft:mcp:connect
+      name:
+        zh-CN: 连接 Agent 接口
+        en: Connect the agent endpoint
+      description: 建立 MCP 会话并调用图像工具
+      default_roles: [normal_user]
+
 frontend:
   enabled: true
   basePath: /app/com.ictrek.photocraft

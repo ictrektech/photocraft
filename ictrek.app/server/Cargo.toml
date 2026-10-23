@@ -47,9 +47,16 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-# `oneshot` drives the router without binding a port in the route tests.
+# The agent surface reuses the desktop MCP server as-is: same tools, same engine, no second API.
+photocraft-automation = { path = "../../crates/automation" }
+# The streamable HTTP transport is the only feature this crate adds on top of what the automation
+# crate already enables; Cargo unions the two feature sets. Both manifests use a caret requirement,
+# so one resolve graph unifies them onto the same release: the VOS server and the desktop stdio
+# server run the same protocol implementation. An exact `=3.5.0` pin would do the same today but
+# break the next time `crates/automation` raises its requirement (no overlap between `=3.5.0` and
+# `^3.6`), turning an upstream bump into a hard resolve failure on the next sync rebase.
+rmcp = { version = "3.5", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
 tower = { version = "0.5", features = ["util"] }
-
 [dev-dependencies]
 tempfile = "3"
 

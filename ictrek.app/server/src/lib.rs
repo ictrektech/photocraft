@@ -18,6 +18,7 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod files;
+pub mod mcp;
 pub mod roots;
 pub mod routes;
 
@@ -33,6 +34,8 @@ pub struct App {
     pub config: Arc<Config>,
     pub client: reqwest::Client,
     pub auth: Arc<auth::Authenticator>,
+    /// `None` when agent traffic is disabled; the route is then not registered at all.
+    pub mcp: Option<Arc<mcp::McpServices>>,
 }
 
 impl App {
@@ -50,6 +53,7 @@ impl App {
             );
         }
         let auth = Arc::new(auth::Authenticator::new(client.clone(), config.userinfo_url.clone(), config.identity_cache_ttl, config.dev_user.clone()));
-        Ok(Self { config: Arc::new(config), client, auth })
+        let mcp = config.mcp.enabled.then(|| Arc::new(mcp::McpServices::new(config.exposed_root.clone(), &config.mcp)));
+        Ok(Self { config: Arc::new(config), client, auth, mcp })
     }
 }

@@ -9,21 +9,26 @@
 use axum::{
     Router,
     extract::DefaultBodyLimit,
-    routing::{get, post},
+    routing::{any, get, post},
 };
 
-use crate::{App, album, files};
+use crate::{App, album, files, mcp};
 
 /// The HTTP surface, mounted by nginx under `/storage/`.
 pub fn router(app: App) -> Router {
     let body_limit = app.config.request_body_limit;
-    let router = Router::new()
+    let mut router = Router::new()
         .route("/album/session", post(album::session))
         .route("/volumes", get(files::volumes))
         .route("/index", get(files::index))
         .route("/download", get(files::download))
         .route("/upload", post(files::upload))
         .route("/new_folder", post(files::new_folder));
+    if app.mcp.is_some() {
+        // Streamable HTTP uses one endpoint for POST/GET/DELETE; the wildcard keeps clients that
+        // append a path segment working instead of returning 404.
+        router = router.route("/mcp", any(mcp::handler)).route("/mcp/{*rest}", any(mcp::handler));
+    }
     router.layer(DefaultBodyLimit::max(body_limit)).with_state(app)
 }
 
@@ -41,10 +46,22 @@ mod tests {
     #[tokio::test]
     async fn every_route_refuses_an_anonymous_request() {
         let router = router(App::new(Config::default()).unwrap());
-        for (method, uri) in [("GET", "/volumes"), ("GET", "/index?adapter=x_1&path=/"), ("GET", "/download?adapter=x_1&path=/")] {
+        for (method, uri) in [("POST", "/mcp"), ("GET", "/volumes"), ("GET", "/index?adapter=x_1&path=/")] {
             let request = Request::builder().method(method).uri(uri).body(Body::empty()).unwrap();
             let response = router.clone().oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{method} {uri}");
         }
+    }
+
+    #[tokio::test]
+    async fn agent_traffic_can_be_turned_off_without_touching_the_file_bridge() {
+        let mut config = Config::default();
+        config.mcp.enabled = false;
+        let router = router(App::new(config).unwrap());
+        let request = Request::builder().method("POST").uri("/mcp").body(Body::empty()).unwrap();
+        assert_eq!(router.clone().oneshot(request).await.unwrap().status(), StatusCode::NOT_FOUND);
+        // The file bridge still answers — with 401, not 404.
+        let request = Request::builder().uri("/volumes").body(Body::empty()).unwrap();
+        assert_eq!(router.oneshot(request).await.unwrap().status(), StatusCode::UNAUTHORIZED);
     }
 }
