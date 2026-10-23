@@ -26,7 +26,7 @@ help:
 
 ## ---- VOS local development --------------------------------------------------------------
 
-vos-dev: ## [VOS] 联调：nginx 前置 dev 构建 + 平台临时路由（VOS_DEV_WEB=2 纯 trunk，VOS_DEV_WEB=0 保真）
+vos-dev: ## [VOS] 联调：nginx 前置 dev 构建 + storage/MCP 边车 + 平台临时路由（VOS_DEV_STORAGE=0 只跑 UI）
 	scripts/vos-dev.sh up
 
 vos-dev-down: ## [VOS] 撤临时路由并停止 dev server / 容器

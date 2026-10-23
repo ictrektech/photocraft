@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # VOS local development for PhotoCraft: serve the app from this workstation inside the platform.
 #
-#   make vos-dev                 # nginx fronting the dev build (container) + temporary Traefik route
+#   make vos-dev                 # nginx fronting the dev build + the storage/MCP sidecar + route
 #   VOS_DEV_WEB=2 make vos-dev   # trunk dev server only, no container (watch + auto reload)
 #   VOS_DEV_WEB=0 make vos-dev   # fidelity mode: dist/web served by the VOS image's nginx
+#   VOS_DEV_STORAGE=0 make vos-dev # skip the storage/MCP sidecar (UI-only work)
 #   make vos-dev-down            # remove the route, stop the server/container
 #   make vos-dev-status          # what is running and who the platform traffic goes to
 #   make vos-dev-logs            # follow the nginx container
@@ -64,6 +65,28 @@ TRUNK_LOG="${STATE_DIR}/trunk.log"
 TRUNK_PID_FILE="${STATE_DIR}/trunk.pid"
 TRUNK_PID=""   # the live `trunk serve` process while the dev server runs (see cmd_up)
 TAIL_PID=""    # the `tail -f` that mirrors trunk's output to this terminal
+
+# The other half of the app: the axum process that serves /storage/ (Finder) and /storage/mcp. It is
+# a native binary, so trunk never compiles it; this script builds and supervises it alongside the
+# wasm hot-reload server. VOS_DEV_STORAGE=0 turns it off.
+STORAGE_PORT="${VOS_DEV_STORAGE_PORT:-38094}"
+STORAGE_LOG="${STATE_DIR}/storage.log"
+STORAGE_PID_FILE="${STATE_DIR}/storage.pid"
+STORAGE_WATCH_PID_FILE="${STATE_DIR}/storage-watch.pid"
+STORAGE_TAIL_PID_FILE="${STATE_DIR}/storage-tail.pid"
+# Where the sidecar looks for authorized directories. A workstation has no VOS mounts, so the dev
+# tree is created here: <root>/users/<dev-user>/data, the same shape the platform mounts.
+# Bind to the docker gateway, not 0.0.0.0: the nginx container reaches it there, while a machine on
+# the LAN cannot. The sidecar trusts a development identity, so the listener must not be wider than
+# the container that needs it. Override with VOS_DEV_STORAGE_BIND_ADDR=0.0.0.0 if that gateway does
+# not exist here.
+STORAGE_BIND_ADDR="${VOS_DEV_STORAGE_BIND_ADDR:-${HOST_GW}}"
+STORAGE_ROOT="${VOS_DEV_STORAGE_ROOT:-${STATE_DIR}/exposed}"
+DEV_USER="${VOS_DEV_USER:-$(id -un 2>/dev/null || printf 'developer')}"
+STORAGE_PID=""
+STORAGE_WATCH_PID=""
+STORAGE_TAIL_PID=""
+
 DOWN_DONE=0    # set by cmd_down so the INT/TERM/EXIT traps clean up only once
 PLATFORM_GW="${VOS_PLATFORM_GW:-http://172.17.0.1:1182}"   # Traefik web-internal entrypoint (HTTP)
 
@@ -78,6 +101,9 @@ die()  { printf '\033[31m[vos-dev][ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
 #   0  nginx serves a release build (byte-identical artifact, slowest to rebuild)
 use_dev_nginx() { [ "${VOS_DEV_WEB:-1}" = "1" ]; }
 use_trunk()     { [ "${VOS_DEV_WEB:-1}" = "2" ]; }
+# The storage sidecar runs in the nginx modes, where nginx can proxy /storage/ to it. In trunk-only
+# mode there is nothing in front of the browser, so it would be unreachable.
+storage_enabled() { [ "${VOS_DEV_STORAGE:-1}" = "1" ] && { use_dev_nginx || [ "${VOS_DEV_WEB:-1}" = "0" ]; }; }
 # The toolchain tag encodes every input that changes the image contents (including the network
 # knobs), exactly as docker/build_toolchain.sh computes it -- both call docker/toolchain_tag.sh.
 # TARGETARCH in the Dockerfile covers the architecture.
@@ -104,6 +130,9 @@ toolchain_image() {
 web_port() { if use_trunk; then printf '%s' "$DEV_PORT"; else printf '%s' "$DIST_PORT"; fi; }
 have() { command -v "$1" >/dev/null 2>&1; }
 port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+port_in_use_on() { (exec 3<>"/dev/tcp/$1/$2") 2>/dev/null; }
+# Either the address we bind now or loopback (a leftover from a run that used the old default).
+storage_port_in_use() { port_in_use_on "$STORAGE_BIND_ADDR" "$STORAGE_PORT" || port_in_use "$STORAGE_PORT"; }
 
 ensure_port_free() {
   if port_in_use "$1"; then
@@ -113,7 +142,7 @@ ensure_port_free() {
     holder="$(lsof -t -i:"$1" 2>/dev/null | tr '\n' ' ' || true)"
     die "port $1 is already in use${holder:+ (pid ${holder% })}
   Stop it (make vos-dev-down, or kill that pid), or pick another port:
-  VOS_DEV_PORT=38094 make vos-dev (or VOS_DEV_DIST_PORT=38095)."
+  VOS_DEV_PORT=38095 make vos-dev (or VOS_DEV_DIST_PORT=38096, VOS_DEV_STORAGE_PORT=38097)."
   fi
 }
 
@@ -415,6 +444,14 @@ render_nginx_conf() {
   if grep -q 'listen \[::\]:8080;' "${STATE_DIR}/nginx.conf"; then
     die "could not strip the IPv6 listener from packaging/web/nginx.conf; the nginx container would not start"
   fi
+  # Inside the dev container 127.0.0.1:8081 is nothing; the sidecar runs on the host, reachable as
+  # host.docker.internal (the compose file adds the gateway alias). This covers both /storage/ and
+  # /storage/mcp, which are the only two upstreams in the file.
+  if storage_enabled; then
+    sed -i "s|http://127.0.0.1:8081|http://host.docker.internal:${STORAGE_PORT}|g" "${STATE_DIR}/nginx.conf"
+    grep -q "host.docker.internal:${STORAGE_PORT}" "${STATE_DIR}/nginx.conf" \
+      || die "could not point /storage/ at the dev storage sidecar (did packaging/web/nginx.conf change?)"
+  fi
   if [ "$mode" != "dev" ]; then
     return 0
   fi
@@ -519,6 +556,165 @@ start_dev_nginx() {
   wait_for_http "http://127.0.0.1:${port}/index.html" "dev nginx container"
 }
 
+# ------------------------------------------------------------------- storage / MCP sidecar
+#
+# The published image runs two processes: nginx (wasm) and photocraft-storage (axum). trunk only
+# builds the wasm half, so the dev environment has to run the other half itself; otherwise every
+# /storage/ request (open/save through Finder, AI Album, /storage/mcp) fails with 502 while the UI
+# looks healthy. Same binary, same routes, native build instead of the container layer.
+
+storage_bin() { printf '%s/debug/photocraft-storage' "${CARGO_TARGET_DIR}"; }
+
+storage_stamp() {
+  # Only the sidecar's own workspace: a change under crates/ already rebuilds the wasm, and scanning
+  # the whole tree every two seconds would cost more than it saves.
+  find ictrek.app/server -path 'ictrek.app/server/target' -prune -o -type f -printf '%T@ %p\n' 2>/dev/null | sort | sha256sum
+}
+
+prepare_storage_root() {
+  mkdir -p "${STORAGE_ROOT}/users/${DEV_USER}/data"
+}
+
+launch_storage() {
+  # DEV identity: this workstation has no VOS userinfo service, so the sidecar trusts every request
+  # as DEV_USER. Both switches are required (see config.rs), and a deployed container sets neither.
+  PHOTOCRAFT_STORAGE_PORT="$STORAGE_PORT" \
+  PHOTOCRAFT_BIND_ADDR="$STORAGE_BIND_ADDR" \
+  PHOTOCRAFT_EXPOSED_ROOT="$STORAGE_ROOT" \
+  PHOTOCRAFT_DEV=1 \
+  PHOTOCRAFT_DEV_USER="$DEV_USER" \
+    "$(storage_bin)" >>"$STORAGE_LOG" 2>&1 &
+  STORAGE_PID=$!
+  printf '%s\n' "$STORAGE_PID" > "$STORAGE_PID_FILE"
+}
+
+wait_for_storage_up() {
+  local code i
+  for i in $(seq 1 120); do
+    # 401 (no dev identity) and 200 both mean the listener is answering.
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://${STORAGE_BIND_ADDR}:${STORAGE_PORT}/volumes" 2>/dev/null || true)"
+    if [ "$code" = "200" ] || [ "$code" = "401" ]; then return 0; fi
+    sleep 0.5
+  done
+  return 1
+}
+
+stop_storage_process() {
+  local pid waited
+  pid="$(cat "$STORAGE_PID_FILE" 2>/dev/null || true)"
+  if [ -n "$pid" ] && pid_alive "$pid"; then
+    kill "$pid" 2>/dev/null || true
+    waited=0
+    while pid_alive "$pid" && (( waited < 5 )); do sleep 0.2; waited=$((waited + 1)); done
+    pid_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
+  fi
+  rm -f "$STORAGE_PID_FILE"
+  STORAGE_PID=""
+}
+
+ensure_storage_port_free() {
+  if storage_port_in_use; then
+    local holder
+    holder="$(lsof -t -i:"$STORAGE_PORT" 2>/dev/null | tr '\n' ' ' || true)"
+    die "port ${STORAGE_PORT} on ${STORAGE_BIND_ADDR} is already in use${holder:+ (pid ${holder% })}
+  Stop it (make vos-dev-down, or kill that pid), or pick another port:
+  VOS_DEV_STORAGE_PORT=38097 make vos-dev."
+  fi
+}
+
+# 结束还占着开发端口、但已经不归这次运行管的 sidecar。判据与 stop_stray_trunk 一致：进程必须真的是
+# photocraft-storage，且工作目录必须是这个检出——另一个 worktree 用同一端口起的 sidecar 只报告，不杀。
+# 不比对 /proc/<pid>/exe 就是为了避免误杀：`pgrep -f photocraft-storage` 会命中每个跑过它的 shell、
+# 跟随日志的 tail 和打开了源码的编辑器。
+stop_stray_storage() {
+  storage_port_in_use || return 0
+  local pid exe cmd cwd
+  for pid in $(lsof -t -i:"$STORAGE_PORT" 2>/dev/null || true); do
+    # /proc/<pid>/exe, not `ps -o comm=`: the kernel truncates comm to 15 characters
+    # (`photocraft-stor`), which would never equal the binary name and the leftover would survive.
+    exe="$(readlink "/proc/${pid}/exe" 2>/dev/null || true)"
+    exe="${exe##*/}"
+    cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1 || true)"
+    if [ "$exe" = photocraft-storage ] && [ "$cwd" = "$ROOT_DIR" ]; then
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+      pid_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
+      log "stopped a leftover storage sidecar holding port ${STORAGE_PORT} (pid ${pid})"
+    else
+      warn "port ${STORAGE_PORT} is held by pid ${pid} (${cmd:-unknown command}) from ${cwd:-an unknown directory}; not ours to stop. Stop it, or use VOS_DEV_STORAGE_PORT=38097 make vos-dev."
+    fi
+  done
+}
+
+# Rebuild + restart whenever the sidecar's sources change. Rust has no hot swap, so "hot reload" here
+# means: the wasm keeps its websocket reload, and the axum process restarts in a second or two while
+# the documents it held are lost (they are dev documents).
+storage_watch() {
+  local last now
+  last="$(storage_stamp)"
+  while :; do
+    sleep 2
+    now="$(storage_stamp)"
+    [ "$now" = "$last" ] && continue
+    last="$now"
+    log "storage: source changed, rebuilding"
+    if ! cargo build --manifest-path ictrek.app/server/Cargo.toml >>"$STORAGE_LOG" 2>&1; then
+      warn "storage: rebuild failed; the previous binary keeps serving (see ${STORAGE_LOG})"
+      continue
+    fi
+    stop_storage_process
+    log "storage: restarting on port ${STORAGE_PORT}"
+    launch_storage
+    wait_for_storage_up || warn "storage: did not come back up; see ${STORAGE_LOG}"
+  done
+}
+
+start_storage() {
+  storage_enabled || { log "storage sidecar off (VOS_DEV_STORAGE=0 or VOS_DEV_WEB=2)"; return 0; }
+  # A run killed before its trap was installed leaves the listener behind; recover it the way
+  # start_trunk does, instead of dying on "port already in use".
+  stop_stray_storage
+  ensure_storage_port_free
+  if command -v ip >/dev/null 2>&1 && ! ip -o -4 addr show 2>/dev/null | grep -qF " ${STORAGE_BIND_ADDR}/"; then
+    die "${STORAGE_BIND_ADDR} is not an address on this host, so the sidecar cannot bind it.
+  The docker bridge is usually the gateway address; otherwise set:
+      VOS_DEV_STORAGE_BIND_ADDR=0.0.0.0 make vos-dev   # wider, including the LAN"
+  fi
+  prepare_storage_root
+  log "building the storage/MCP sidecar (first build compiles the engine; later ones are incremental)"
+  cargo build --manifest-path ictrek.app/server/Cargo.toml >>"$STORAGE_LOG" 2>&1 \
+    || die "photocraft-storage failed to build; see ${STORAGE_LOG}"
+  : > "$STORAGE_LOG"
+  launch_storage
+  tail -n +1 -f "$STORAGE_LOG" &
+  STORAGE_TAIL_PID=$!
+  printf '%s\n' "$STORAGE_TAIL_PID" > "$STORAGE_TAIL_PID_FILE"
+  wait_for_storage_up || die "photocraft-storage did not answer on 127.0.0.1:${STORAGE_PORT}; see ${STORAGE_LOG}"
+  log "storage on http://${STORAGE_BIND_ADDR}:${STORAGE_PORT}: /storage/ (Finder) and /storage/mcp (agents)"
+  log "dev identity: ${DEV_USER}, workspace ${STORAGE_ROOT}/users/${DEV_USER}/data"
+  storage_watch &
+  STORAGE_WATCH_PID=$!
+  printf '%s\n' "$STORAGE_WATCH_PID" > "$STORAGE_WATCH_PID_FILE"
+}
+
+stop_storage() {
+  local pid
+  if [ -f "$STORAGE_WATCH_PID_FILE" ]; then
+    pid="$(cat "$STORAGE_WATCH_PID_FILE")"
+    pid_alive "$pid" && kill "$pid" 2>/dev/null || true
+    rm -f "$STORAGE_WATCH_PID_FILE"
+  fi
+  stop_storage_process
+  if [ -f "$STORAGE_TAIL_PID_FILE" ]; then
+    pid="$(cat "$STORAGE_TAIL_PID_FILE")"
+    pid_alive "$pid" && kill "$pid" 2>/dev/null || true
+    rm -f "$STORAGE_TAIL_PID_FILE"
+  fi
+  STORAGE_WATCH_PID=""
+  STORAGE_TAIL_PID=""
+}
+
 cmd_up() {
   local port
   port="$(web_port)"
@@ -531,12 +727,15 @@ cmd_up() {
   trap 'cmd_down "shell exiting"' EXIT
 
   if use_dev_nginx; then
+    start_storage
     start_trunk
     start_dev_nginx "$port"
   elif use_trunk; then
+    # No container in front: /storage/ would hit trunk, so the sidecar has nowhere to be reached.
     start_trunk
   else
     build_web
+    start_storage
     ensure_port_free "$port"
     render_nginx_conf release
     render_compose "../../dist/web" "$port"
@@ -580,11 +779,18 @@ cmd_down() {
   if [ "${DOWN_DONE:-0}" = "1" ]; then
     # A trap already did the work; still drop the state files so nothing looks "running".
     rm -f "$TRUNK_PID_FILE" "${STATE_DIR}/tail.pid"
+    rm -f "$STORAGE_PID_FILE" "$STORAGE_WATCH_PID_FILE" "$STORAGE_TAIL_PID_FILE"
     return 0
   fi
   DOWN_DONE=1
   trap - INT TERM HUP EXIT
   route_off
+  # The sidecar is not a child of trunk and is not in the container, so nothing else here stops it:
+  # without this it outlives `down`, keeps holding STORAGE_PORT, and the next `up` dies with
+  # `AddrInUse` while the orphan serves a stale binary. Unconditional (not gated on storage_enabled)
+  # because `down` must clean up whatever a *previous* invocation left behind, and stop_storage is
+  # a no-op when the pid files are already gone.
+  stop_storage
   if [ -f "$TRUNK_PID_FILE" ]; then
     local pid
     pid="$(pid_in_file)"
@@ -615,6 +821,10 @@ cmd_down() {
   # 比 pid 文件活得久的 trunk 还占着端口，下一次 `up` 就死在 "port already in use"，而且没有东西可清理。
   # 停掉还在监听的那个进程，但只在它确实是 trunk 时（端口上无关的服务不归我们杀）。
   stop_stray_trunk
+  # The same failure mode for the sidecar: a `storage` whose pid file was lost (a killed shell, a
+  # `down` from before this cleanup existed) still owns STORAGE_PORT. Only a process that really is
+  # this checkout's sidecar is stopped; anything else is reported.
+  stop_stray_storage
   if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER"; then
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
     log "nginx container removed"
@@ -637,6 +847,10 @@ cmd_status() {
   printf 'port       : %s (%s)\n' "$port" "$(port_in_use "$port" && echo listening || echo 'not listening')"
   printf 'bind addr  : %s (the platform reaches it as %s)\n' "$DEV_BIND_ADDR" "$HOST_GW"
   if tree_running; then printf 'trunk pid  : %s\n' "$(cat "$TRUNK_PID_FILE")"; fi
+  if storage_enabled; then
+    printf 'storage    : %s:%s (%s), dev identity %s\n' \
+      "$STORAGE_BIND_ADDR" "$STORAGE_PORT" "$(storage_port_in_use && echo listening || echo 'not listening')" "$DEV_USER"
+  fi
   if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER"; then printf 'container  : running\n'; fi
   if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$TRAEFIK_CONTAINER"; then
     if docker exec "$TRAEFIK_CONTAINER" test -f "$ROUTE_FILE" 2>/dev/null; then
