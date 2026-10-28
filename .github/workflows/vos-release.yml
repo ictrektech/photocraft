@@ -24,7 +24,9 @@ concurrency:
 
 jobs:
   release:
-    name: Package and publish
+    name: GitHub Release
+    outputs:
+      version: ${{ steps.version.outputs.value }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -139,12 +141,36 @@ jobs:
           } > "${notes}"
           if gh release view "${public_tag}" >/dev/null 2>&1; then
             gh release upload "${public_tag}" "${package}" --clobber
-            gh release edit "${public_tag}" --notes-file "${notes}"
+            gh release edit "${public_tag}" --notes-file "${notes}" --draft=false --latest
           else
             gh release create "${public_tag}" "${package}" \
-              --verify-tag --draft \
+              --verify-tag --latest \
               --title "PhotoCraft VOS ${version}" --notes-file "${notes}"
           fi
+
+          gh release view "${public_tag}" --json isDraft,assets | python3 -c '
+          import json, sys
+          release = json.load(sys.stdin)
+          assert not release["isDraft"], "GitHub Release is still a draft"
+          assert any(a["name"] == sys.argv[1] for a in release["assets"]), "Release package is missing"
+          ' "$(basename "${package}")"
+
+  appstore:
+    name: VOS App Store
+    needs: release
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.release.outputs.version }}
+    steps:
+      - name: Download the published GitHub package
+        run: |
+          set -euo pipefail
+          gh release download "v${VERSION}" --repo "$GITHUB_REPOSITORY" \
+            --pattern "photocraft_${VERSION}_pull.tar" --dir ictrek.app/dist
 
       - name: Upload to the VOS App Store (tag runs only)
         if: github.ref_type == 'tag'
@@ -155,10 +181,10 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${APPSTORE_IP:-}" || -z "${APPSTORE_TOKEN:-}" ]]; then
-            echo "::warning::APPSTORE_IP/APPSTORE_TOKEN are not configured; the package was built and released but not uploaded"
-            exit 0
+            echo "::error::APPSTORE_IP/APPSTORE_TOKEN are not configured; GitHub Release is already published"
+            exit 1
           fi
-          version="${{ steps.version.outputs.value }}"
+          version="${VERSION}"
           package="ictrek.app/dist/photocraft_${version}_pull.tar"
           mkdir -p "$HOME/.ssh"
           chmod 700 "$HOME/.ssh"
@@ -169,7 +195,7 @@ jobs:
             printf '%s\n' "${APPSTORE_HOST_KEY}" > "$HOME/.ssh/known_hosts"
           else
             echo "::warning::APPSTORE_HOST_KEY is not set; trusting a freshly scanned key"
-            ssh-keyscan -H -p 32222 "${APPSTORE_IP}" >> "$HOME/.ssh/known_hosts" 2>/dev/null
+            ssh-keyscan -T 10 -H -p 32222 "${APPSTORE_IP}" >> "$HOME/.ssh/known_hosts" 2>/dev/null
           fi
           askpass="$RUNNER_TEMP/vos-appstore-askpass.sh"
           printf '#!/bin/sh\nprintf "%%s\\n" "$APPSTORE_TOKEN"\n' > "$askpass"
@@ -178,12 +204,12 @@ jobs:
           socket="$RUNNER_TEMP/vos-appstore.sock"
           trap 'ssh -S "$socket" -O exit -p 32222 tunneluser@"${APPSTORE_IP}" >/dev/null 2>&1 || true' EXIT
           ssh -M -S "$socket" -f -N -L 18899:127.0.0.1:18090 -p 32222 \
-            -o BatchMode=no -o ExitOnForwardFailure=yes \
+            -o BatchMode=no -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ConnectionAttempts=1 \
             -o PreferredAuthentications=password -o PubkeyAuthentication=no \
             tunneluser@"${APPSTORE_IP}" </dev/null
           ready=false
           for _ in $(seq 1 30); do
-            if curl -fsS "http://127.0.0.1:18899/api/health" >/dev/null; then ready=true; break; fi
+            if curl --connect-timeout 3 --max-time 5 -fsS "http://127.0.0.1:18899/api/health" >/dev/null; then ready=true; break; fi
             sleep 1
           done
           [[ "${ready}" == true ]] || { echo "::error::the App Store tunnel never became ready"; exit 1; }

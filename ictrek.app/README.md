@@ -5,6 +5,10 @@
 `apps/motrix-next/ictrek.app` 为蓝本）。正式发布以 `update_version.sh` 触发的 GitHub Actions
 为准（`.github/workflows/vos-release.yml`）。
 
+GitHub Release 与应用商店上传使用独立任务。GitHub 先公开 Release 并校验安装包；
+重跑也会解除已有草稿状态。商店任务从公开 Release 下载同一安装包，失败仅影响商店，
+不会阻止或撤回 GitHub 发布。手动运行仍只验证模板，不发布版本。
+
 ## 运行方式
 
 同一镜像包含 WebAssembly 编辑器、nginx 和一个小型 Rust 授权目录服务。
