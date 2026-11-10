@@ -1,0 +1,2273 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PhotoCraft API</title><style>body{font:16px/1.65 system-ui,sans-serif;color:#233247;background:#fff;max-width:1100px;margin:auto;padding:24px}nav{position:sticky;top:0;background:#fff;padding:12px 0;border-bottom:1px solid #ddd}nav a{margin-right:10px}a{color:#086a81}pre{overflow:auto;background:#f4f6f8;padding:16px;border-radius:8px}code{overflow-wrap:anywhere}table{display:block;overflow:auto;border-collapse:collapse}td,th{padding:8px;border:1px solid #ddd;text-align:left}h2,h3{scroll-margin-top:85px}#zh-doc{display:none}body:has(#zh:target) #en-doc,body:has(#zh-doc :target) #en-doc{display:none}body:has(#zh:target) #zh-doc,body:has(#zh-doc :target) #zh-doc{display:block}</style><span id="zh"></span><span id="en"></span><nav><strong>PhotoCraft API</strong> · <a href="#zh">简体中文</a> · <a href="#en">English</a></nav><main><article id="zh-doc" lang="zh-CN"><details open><summary>快速跳转</summary><a href="#zh-section-1">地址和协议</a> · <a href="#zh-section-2">身份、权限和 Key</a> · <a href="#zh-section-3">文件桥完整字段</a> · <a href="#zh-section-4">MCP 初始化、发现和会话</a> · <a href="#zh-section-5">命令、任务、取消和结果</a> · <a href="#zh-section-6">桌面控制协议</a> · <a href="#zh-section-7">原生 MCP 工具输入</a> · <a href="#zh-section-8">command_batch</a> · <a href="#zh-section-9">command_list</a> · <a href="#zh-section-10">command_run</a> · <a href="#zh-section-11">control_call</a> · <a href="#zh-section-12">doc_close</a> · <a href="#zh-section-13">doc_export</a> · <a href="#zh-section-14">doc_export_data_sets</a> · <a href="#zh-section-15">doc_export_layers</a> · <a href="#zh-section-16">doc_import_data_sets</a> · <a href="#zh-section-17">doc_inspect</a> · <a href="#zh-section-18">doc_new</a> · <a href="#zh-section-19">doc_open</a> · <a href="#zh-section-20">doc_place</a> · <a href="#zh-section-21">doc_render_preview</a> · <a href="#zh-section-22">doc_save</a> · <a href="#zh-section-23">doc_select</a> · <a href="#zh-section-24">jobs_cancel</a> · <a href="#zh-section-25">jobs_list</a> · <a href="#zh-section-26">render_preview</a> · <a href="#zh-section-27">session_list</a> · <a href="#zh-section-28">ui_inspect</a> · <a href="#zh-section-29">ui_menu_invoke</a> · <a href="#zh-section-30">ui_pointer</a> · <a href="#zh-section-31">ui_screenshot</a> · <a href="#zh-section-32">ui_set</a></details><h1>PhotoCraft VOS API</h1>
+<h2 id="zh-section-1">地址和协议</h2>
+<p>VOS 同源前缀 <code>/app/com.ictrek.photocraft</code>，容器 <code>http://photocraft-web:8080</code>；没有独立宿主机映射端口。nginx 将 <code>/storage/*</code> 转到同容器 Rust 服务8081；外部使用前缀后的 <code>/storage/*</code>，不要直接连接内部8081。侧栏 API 文档提供本文的中英文版本和跳转目录。</p>
+<p>VOS 文件桥是 HTTP；<code>/storage/mcp</code> 是 Streamable HTTP MCP；独立桌面 <code>127.0.0.1:&lt;control-port&gt;</code> 是逐行 JSON TCP 控制协议。三种接口不能混用。</p>
+<h2 id="zh-section-2">身份、权限和 Key</h2>
+<p>VOS HTTP/MCP 每个请求都要带 <code>Authorization: Bearer $VOS_TOKEN</code>，由 VOS userinfo 核验用户，成功结果短期缓存（默认60秒）。应用上下文/admin app token 不是人的身份，会被拒绝；MCP Session ID 只做路由，不能替代身份。没有应用个人 API Key 的创建/修改/查询 API，V-Scheduler Key 或厂商 Key 不能代替 VOS 用户 token。</p>
+<p>用户可访问平台挂载的 public 授权目录和自己的 <code>users/USERNAME/data</code>，不能穿越到其他用户、脚手架目录或越界软链接。模型 public/private、模型 Key、节点注册和计算预算属于 V-Scheduler 的 API，不是 PhotoCraft 文件桥的配置项。</p>
+<h2 id="zh-section-3">文件桥完整字段</h2>
+<p>成功 JSON 为 <code>{code:0,data:...}</code>；不要要求 msg 字段必须存在。</p>
+<ul>
+<li><code>GET /storage/volumes</code>：200 <code>{code:0,data:{total,data:[{uuid,name,adapter}]}}</code>。adapter 形如 x_HASH，是实际授权目录ID，不是绝对路径；后续请求使用这里返回的值。</li>
+<li><code>GET /storage/index?adapter=ID&amp;path=/RELATIVE_DIR</code>：200 <code>{code:0,data:{files:[{type,path,basename,extension,file_size,storage}]}}</code>。type=dir/file，file_size 为字节，storage 为 adapter。按 basename 排序、隐藏点文件；没有分页，达到10000项时拒绝并要求更小目录，不返回无标记的截断列表。</li>
+<li><code>GET /storage/download?adapter=ID&amp;path=/RELATIVE_FILE</code>：返回 application/octet-stream 原始字节，不是 JSON 包装；默认最大256MiB，超限413。不存在/只读或无权限的文件不能因为拿到 adapter 就绕过校验。</li>
+<li><code>POST /storage/upload?adapter=ID&amp;path=/RELATIVE_DIR&amp;name=FILENAME</code>：请求体为原始字节，不是 multipart/JSON；200 <code>{code:0,data:&quot;saved&quot;}</code>。默认请求体256MiB（nginx和Rust服务同时约束），在目标目录写临时文件、sync后原子替换同名目标，<strong>会覆盖已有同名文件</strong>，失败清理临时文件。先确认目标目录及名称。</li>
+<li><code>POST /storage/new_folder</code>：application/json <code>{adapter:string,path:string,name:string}</code>，200 <code>{code:0,data:&quot;created&quot;}</code>。创建单个目录，不是递归 mkdir；name 必须是单个合法文件名。</li>
+<li><code>POST /storage/album/session</code>：application/json <code>{origin:&quot;https://VOS_HOST:PORT&quot;}</code>；要求当前 VOS 用户 Bearer。origin 必须同Host、不能有路径/查询/片段；HTTP origin 被转换到平台外部HTTPS端口。成功返回 AI 相册的原生会话对象（含accessToken），属于当前用户的敏感凭证，不能当作长期PhotoCraft Key保存或打印。相册不可达/返回无效会话502、身份失败401。</li>
+</ul>
+<p>以上没有列出的 rename/delete/API Key 管理 HTTP 接口不应自行猜测。框架的参数/JSON抽取错误可能返回原生400/422文本，不能强制所有响应都解析同一JSON。</p>
+<pre><code class="language-bash">BASE=http://photocraft-web:8080
+curl &quot;$BASE/storage/volumes&quot; -H &quot;Authorization: Bearer $VOS_TOKEN&quot;
+# 将上一步的 adapter 设为 ADAPTER；目录和文件名使用URL编码
+curl --get &quot;$BASE/storage/index&quot; -H &quot;Authorization: Bearer $VOS_TOKEN&quot; --data-urlencode &quot;adapter=$ADAPTER&quot; --data-urlencode 'path=/'
+curl --get &quot;$BASE/storage/download&quot; -H &quot;Authorization: Bearer $VOS_TOKEN&quot; --data-urlencode &quot;adapter=$ADAPTER&quot; --data-urlencode 'path=/example.png' --output example.png
+</code></pre>
+<h2 id="zh-section-4">MCP 初始化、发现和会话</h2>
+<p><code>POST/GET/DELETE /storage/mcp</code> 使用 MCP JSON-RPC 2.0，接受 JSON/SSE。每次请求都带 VOS Bearer。先 initialize，保存服务返回的 Mcp-Session-Id，再发 notifications/initialized；后续 tools/list 和 tools/call 保留会话头。SDK 负责 SSE 和协议版本协商。</p>
+<pre><code class="language-bash">MCP=http://photocraft-web:8080/storage/mcp
+curl -i &quot;$MCP&quot; -H &quot;Authorization: Bearer $VOS_TOKEN&quot; -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:1,&quot;method&quot;:&quot;initialize&quot;,&quot;params&quot;:{&quot;protocolVersion&quot;:&quot;2025-03-26&quot;,&quot;capabilities&quot;:{},&quot;clientInfo&quot;:{&quot;name&quot;:&quot;example-agent&quot;,&quot;version&quot;:&quot;1.0&quot;}}}'
+# 将响应头保存为 MCP_SESSION，并使用服务协商的版本。
+curl &quot;$MCP&quot; -H &quot;Authorization: Bearer $VOS_TOKEN&quot; -H &quot;Mcp-Session-Id: $MCP_SESSION&quot; -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;notifications/initialized&quot;}'
+curl &quot;$MCP&quot; -H &quot;Authorization: Bearer $VOS_TOKEN&quot; -H &quot;Mcp-Session-Id: $MCP_SESSION&quot; -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:2,&quot;method&quot;:&quot;tools/list&quot;,&quot;params&quot;:{}}'
+curl &quot;$MCP&quot; -H &quot;Authorization: Bearer $VOS_TOKEN&quot; -H &quot;Mcp-Session-Id: $MCP_SESSION&quot; -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:3,&quot;method&quot;:&quot;tools/call&quot;,&quot;params&quot;:{&quot;name&quot;:&quot;session_list&quot;,&quot;arguments&quot;:{}}}'
+</code></pre>
+<p>VOS 使用按用户隔离的 headless 文档；浏览器画布与MCP内存文档不是自动同步的同一文档。创建/打开后继续用同一个MCP会话编辑，显式 doc_save/doc_export 保存结果。默认最多8个驻留用户工作区、空闲30分钟回收；全部被占用时429。不要依赖重启/回收后尚未保存的文档。</p>
+<p>有状态连续编辑应协商支持session的版本，例如已验证的2025-03-26；rmcp在2026-07-28协议下无状态处理，跨调用内存文档不能被假定保留。关闭会话前保存；未知/过期会话重新初始化后先检查文件，不能盲目重放修改。</p>
+<h2 id="zh-section-5">命令、任务、取消和结果</h2>
+<p>tools/list 返回25项原生工具及完整 inputSchema；下方列出字段。先 session_list，再 doc_new/doc_open，用 command_list 的 filter/enabled_only 发现命令ID、params说明和禁用原因，再 command_run。不要根据界面文字猜命令ID。command_batch 最多256步，每条命令独立历史步骤，失败/预算到达时保留已执行步骤和结果，不承诺整批回滚。</p>
+<p>command_run 的 wait 默认true；wait=false 对长命令返回 <code>{job:id}</code>，用 jobs_list 查询。jobs_cancel 的 job 为可选数值ID，<strong>省略会取消所有运行任务</strong>，只停一个时必须带ID。断开HTTP/关闭MCP会话不是已保存文档回滚，超时或响应预算错误可能发生在操作已经执行之后；检查文档与任务状态后再决定重试。</p>
+<p>工具结果主要在 MCP content 的text（JSON文本）中，图片为image/base64/mimeType；不要假定一定有 structuredContent。同时检查 isError 和JSON-RPC error，HTTP200不表示工具成功。标为 Bridge mode 的 ui_* / control_call 需要连接真实桌面桥，在VOS headless模式不可当作可用UI自动化。</p>
+<p>MCP帧默认1MiB；预览受2048边长和5MiB PNG预算、响应8MiB预算约束。通过 <code>/storage/mcp</code> 的 nginx 超时300秒不是任务执行许可；如需更长工作，使用原生后台job。身份错误401/应用token403、不可用目录404或400、格式/路径400、过大413、MCP工作区忙429、身份或相册上游故障502。Rust业务错误为 <code>{code:10001|10007|10002,msg,data:null}</code>，分别覆盖未认证、未找到和其他错误；代理/框架/MCP有自己的错误格式。</p>
+<h2 id="zh-section-6">桌面控制协议</h2>
+<p>独立桌面用 token文件或 PHOTOCRAFT_CONTROL_TOKEN_FILE 配置TCP控制token，首次连接必须先auth；后续逐行 <code>{id,method,params}</code>，响应 <code>{id,ok,result}</code> 或 <code>{id,ok:false,error}</code>。这是桌面控制凭证，不是VOS用户Key。默认控制调用60秒：<code>timeout: not run</code>可重试，<code>timeout: no reply in 60s</code>可能已执行；确认文档后再重放。完整 <a href="https://github.com/ictrektech/photocraft/blob/main/docs/control-protocol.md">桌面控制协议</a> 与 <a href="https://github.com/ictrektech/photocraft/blob/main/crates/automation/src/server.rs">Rust自动化工具</a> 保持原生所有功能。</p>
+<h2 id="zh-section-7">原生 MCP 工具输入</h2>
+<p>以下 schema 来自可执行原生服务，并已对照当前Rust源码核对25个工具名和全部22个参数工具的顶层字段（含serde重命名）。实时tools/list仍是当前会话的最终依据。字段说明保留原生英文术语，嵌套结构、required、枚举和限制均保留。</p>
+<h3 id="zh-section-8">command_batch</h3>
+<p>Run several engine commands in one call, in order (fewer round trips). Returns {completed, failed, results:[{ok, result|error}]}; stops at the first error unless stop_on_error is false. Not an atomic transaction: earlier successful steps stay applied (no rollback).</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;steps&quot;: {
+        &quot;description&quot;: &quot;Commands to run in order: `[{\&quot;id\&quot;: \&quot;layer.new.layer\&quot;, \&quot;params\&quot;: {\&quot;name\&quot;: \&quot;Ink\&quot;}}, …]`. A\nstep with `\&quot;wait\&quot;: false` starts a long command as a background job (its result is\n`{\&quot;job\&quot;: id}`, as in `command_run`); later steps that edit the same document fail until\nthe job ends.&quot;,
+        &quot;items&quot;: {
+          &quot;additionalProperties&quot;: false,
+          &quot;properties&quot;: {
+            &quot;id&quot;: {
+              &quot;description&quot;: &quot;Command id, e.g. `layer.new.layer`, `filter.blur.gaussianBlur`.&quot;,
+              &quot;type&quot;: &quot;string&quot;
+            },
+            &quot;params&quot;: {
+              &quot;default&quot;: null,
+              &quot;description&quot;: &quot;Command parameters as a JSON object (see the `params` doc in `command_list`).&quot;
+            },
+            &quot;wait&quot;: {
+              &quot;default&quot;: null,
+              &quot;description&quot;: &quot;Wait for a long command (filters, Content-Aware Fill, Photomerge, …) to finish (default\ntrue). With false it runs as a background job and the result is `{\&quot;job\&quot;: id}`: poll it\nwith `jobs_list`, stop it with `jobs_cancel`.&quot;,
+              &quot;type&quot;: [
+                &quot;boolean&quot;,
+                &quot;null&quot;
+              ]
+            }
+          },
+          &quot;required&quot;: [
+            &quot;id&quot;
+          ],
+          &quot;type&quot;: &quot;object&quot;
+        },
+        &quot;type&quot;: &quot;array&quot;
+      },
+      &quot;stop_on_error&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Stop at the first failing step (default true).&quot;,
+        &quot;type&quot;: [
+          &quot;boolean&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;required&quot;: [
+      &quot;steps&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Command batch&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-9">command_list</h3>
+<p>List engine commands. Returns a JSON array (no wrapper object) of {id, label, menu: [path], shortcut: string|null, params: doc string, enabled: bool, disabledReason: string|null, needsDocument: bool}. <code>disabledReason</code> says why a command is off (null when enabled); <code>needsDocument</code> is true when it is off because no document is open: create or open one first (doc_new, doc_open).</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;enabled_only&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Only commands that can run right now.&quot;,
+        &quot;type&quot;: [
+          &quot;boolean&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;filter&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Only commands whose id, label or keywords contain this text (case-insensitive).&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Command list&quot;,
+    &quot;readOnlyHint&quot;: true,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: true,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-10">command_run</h3>
+<p>Run an engine command by id with JSON params (see command_list). Returns the command's JSON result. Long commands (filters, Content-Aware Fill/Scale, Photomerge, brush import) wait to finish unless <code>wait</code> is false: then they run as a background job and the result is {job: id} (see jobs_list, jobs_cancel).</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;id&quot;: {
+        &quot;description&quot;: &quot;Command id, e.g. `layer.new.layer`, `filter.blur.gaussianBlur`.&quot;,
+        &quot;type&quot;: &quot;string&quot;
+      },
+      &quot;params&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Command parameters as a JSON object (see the `params` doc in `command_list`).&quot;
+      },
+      &quot;wait&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Wait for a long command (filters, Content-Aware Fill, Photomerge, …) to finish (default\ntrue). With false it runs as a background job and the result is `{\&quot;job\&quot;: id}`: poll it\nwith `jobs_list`, stop it with `jobs_cancel`.&quot;,
+        &quot;type&quot;: [
+          &quot;boolean&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;required&quot;: [
+      &quot;id&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Command run&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-11">control_call</h3>
+<p>Bridge mode: call any control-protocol method (docs/control-protocol.md) with raw params.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;method&quot;: {
+        &quot;description&quot;: &quot;Any control-protocol method, e.g. `ui.dialog.open`.&quot;,
+        &quot;type&quot;: &quot;string&quot;
+      },
+      &quot;params&quot;: {
+        &quot;default&quot;: null
+      }
+    },
+    &quot;required&quot;: [
+      &quot;method&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Control call&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-12">doc_close</h3>
+<p>Close a document (default: the active one) without saving.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Document index from `session_list` (default: the active document).&quot;,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc close&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-13">doc_export</h3>
+<p>Export the document to another format (same as doc_save with an explicit path/format).</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;dpxBits&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;DPX: 8, 10, 12 or 16 bits per sample. Unset: 8 for an 8-bit document, else 16.&quot;,
+        &quot;format&quot;: &quot;uint8&quot;,
+        &quot;maximum&quot;: 255,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;format&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Format override as an extension (pcraft, psd, png, jpg, tif, webp, exr, …).&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;path&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Target beneath the configured automation write root: relative (forward slashes) or absolute.\nThe extension selects the format. Omit to write back to the document's own file, which\nworks only for a PSD, PSB or .pcraft file kept in its own format; any other save needs\n`path`, so a flattened or converted copy never replaces the opened file.&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;quality&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;JPEG or WebP quality 1..100. A WebP saved with a quality is lossy; without one it is lossless.&quot;,
+        &quot;format&quot;: &quot;uint8&quot;,
+        &quot;maximum&quot;: 255,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;tgaBits&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;TGA: 24 or 32 bits per pixel. 32 writes the alpha channel (or else the transparency) as the\nalpha, 24 none. Unset: 32 with an alpha channel or transparency, else 24.&quot;,
+        &quot;format&quot;: &quot;uint8&quot;,
+        &quot;maximum&quot;: 255,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;tiffLayers&quot;: {
+        &quot;default&quot;: false,
+        &quot;description&quot;: &quot;TIFF: keep the layers (Photoshop layer data). Off by default: a flat TIFF.&quot;,
+        &quot;type&quot;: &quot;boolean&quot;
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc export&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-14">doc_export_data_sets</h3>
+<p>Export every data set of the document as its own flattened file beneath the write root (the capability-scoped Export Data Sets). The batch is planned first, so colliding filenames are refused before any file is written.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;data_sets&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Only these data sets, by name; default every one of them.&quot;,
+        &quot;items&quot;: {
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;type&quot;: [
+          &quot;array&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;dir&quot;: {
+        &quot;description&quot;: &quot;Directory beneath the configured automation write root: relative (forward slashes) or absolute.&quot;,
+        &quot;type&quot;: &quot;string&quot;
+      },
+      &quot;format&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Export format (default png).&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Document index from `session_list` (default: the active document).&quot;,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;naming&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Filename template with `{name}`, `{index}` and `{document}` (default `{name}`).&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;required&quot;: [
+      &quot;dir&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc export data sets&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-15">doc_export_layers</h3>
+<p>Export each exported layer of the document as its own file beneath the write root (the capability-scoped Layers to Files). A file that already exists is an error, not an overwrite.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;dir&quot;: {
+        &quot;description&quot;: &quot;Directory beneath the configured automation write root: relative (forward slashes) or absolute.&quot;,
+        &quot;type&quot;: &quot;string&quot;
+      },
+      &quot;format&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Export format (default png).&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Document index from `session_list` (default: the active document).&quot;,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;prefix&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Filename prefix (default: the document name).&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;quality&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Encoder quality, 0..12, for the formats that take one.&quot;,
+        &quot;format&quot;: &quot;double&quot;,
+        &quot;type&quot;: [
+          &quot;number&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;visible_only&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Export only the layers that are visible (default true).&quot;,
+        &quot;type&quot;: [
+          &quot;boolean&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;required&quot;: [
+      &quot;dir&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc export layers&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-16">doc_import_data_sets</h3>
+<p>Import a data set CSV from the read root into the document (the capability-scoped Import Variable Data Sets).</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;delimiter&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Field delimiter (default `,`).&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Document index from `session_list` (default: the active document).&quot;,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;path&quot;: {
+        &quot;description&quot;: &quot;Path beneath the configured automation read root: relative (forward slashes) or absolute.&quot;,
+        &quot;type&quot;: &quot;string&quot;
+      }
+    },
+    &quot;required&quot;: [
+      &quot;path&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc import data sets&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-17">doc_inspect</h3>
+<p>Document state as JSON: layer tree (top to bottom), history, selection, active layer.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Document index from `session_list` (default: the active document).&quot;,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc inspect&quot;,
+    &quot;readOnlyHint&quot;: true,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: true,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-18">doc_new</h3>
+<p>Create a new document (defaults: 1920x1080 RGB 8-bit white).</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;background&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;white | black | transparent | #rrggbb&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;depth&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;8 | 16 | 32&quot;,
+        &quot;format&quot;: &quot;uint32&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;height&quot;: {
+        &quot;default&quot;: null,
+        &quot;format&quot;: &quot;uint32&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;mode&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;rgb | gray | cmyk | lab&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;name&quot;: {
+        &quot;default&quot;: null,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;width&quot;: {
+        &quot;default&quot;: null,
+        &quot;format&quot;: &quot;uint32&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc new&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-19">doc_open</h3>
+<p>Open an image or document file and make it active. Returns index, size and import warnings.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;path&quot;: {
+        &quot;description&quot;: &quot;Path beneath the configured automation read root: relative (forward slashes) or absolute.&quot;,
+        &quot;type&quot;: &quot;string&quot;
+      }
+    },
+    &quot;required&quot;: [
+      &quot;path&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc open&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-20">doc_place</h3>
+<p>Place a file into the document as a Smart Object layer (Place Embedded), reading <code>path</code> beneath the read root. <code>scale</code> (percent), <code>fit</code> and <code>center</code> are the command's own.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;center&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Centre of the placed layer, in document pixels.&quot;,
+        &quot;items&quot;: {
+          &quot;format&quot;: &quot;double&quot;,
+          &quot;type&quot;: &quot;number&quot;
+        },
+        &quot;maxItems&quot;: 2,
+        &quot;minItems&quot;: 2,
+        &quot;type&quot;: [
+          &quot;array&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;fit&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Place at a centred size instead of a scaled one.&quot;,
+        &quot;type&quot;: [
+          &quot;boolean&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Document index from `session_list` (default: the active document).&quot;,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;path&quot;: {
+        &quot;description&quot;: &quot;Path beneath the configured automation read root: relative (forward slashes) or absolute.&quot;,
+        &quot;type&quot;: &quot;string&quot;
+      },
+      &quot;scale&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Scale as a percentage; defaults to fitting a file larger than the canvas.&quot;,
+        &quot;format&quot;: &quot;double&quot;,
+        &quot;type&quot;: [
+          &quot;number&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;required&quot;: [
+      &quot;path&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc place&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-21">doc_render_preview</h3>
+<p>Render the flattened document and return it as a PNG image (bridge mode: window screenshot).</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Headless mode only: document index (default: the active document).\nBridge previews capture the app window and reject `index`.&quot;,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;max_side&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Longest side of a headless preview (default 1024, maximum 2048).\nZero requests full size within that ceiling. Bridge mode returns the window screenshot.&quot;,
+        &quot;format&quot;: &quot;uint32&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc render preview&quot;,
+    &quot;readOnlyHint&quot;: true,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: true,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-22">doc_save</h3>
+<p>Save the document. <code>.pcraft</code> is the lossless native format (incremental); other extensions (psd, png, jpg, tif, webp, exr, …) export. Without <code>path</code> only a PSD, PSB or .pcraft document is written back to its own         file. Returns warnings about anything the format cannot hold.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;dpxBits&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;DPX: 8, 10, 12 or 16 bits per sample. Unset: 8 for an 8-bit document, else 16.&quot;,
+        &quot;format&quot;: &quot;uint8&quot;,
+        &quot;maximum&quot;: 255,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;format&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Format override as an extension (pcraft, psd, png, jpg, tif, webp, exr, …).&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;path&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Target beneath the configured automation write root: relative (forward slashes) or absolute.\nThe extension selects the format. Omit to write back to the document's own file, which\nworks only for a PSD, PSB or .pcraft file kept in its own format; any other save needs\n`path`, so a flattened or converted copy never replaces the opened file.&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;quality&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;JPEG or WebP quality 1..100. A WebP saved with a quality is lossy; without one it is lossless.&quot;,
+        &quot;format&quot;: &quot;uint8&quot;,
+        &quot;maximum&quot;: 255,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;tgaBits&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;TGA: 24 or 32 bits per pixel. 32 writes the alpha channel (or else the transparency) as the\nalpha, 24 none. Unset: 32 with an alpha channel or transparency, else 24.&quot;,
+        &quot;format&quot;: &quot;uint8&quot;,
+        &quot;maximum&quot;: 255,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;tiffLayers&quot;: {
+        &quot;default&quot;: false,
+        &quot;description&quot;: &quot;TIFF: keep the layers (Photoshop layer data). Off by default: a flat TIFF.&quot;,
+        &quot;type&quot;: &quot;boolean&quot;
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc save&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-23">doc_select</h3>
+<p>Make the document at <code>index</code> active.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;index&quot;: {
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: &quot;integer&quot;
+      }
+    },
+    &quot;required&quot;: [
+      &quot;index&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc select&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-24">jobs_cancel</h3>
+<p>Cancel a background job by id (or every running job when <code>job</code> is omitted). The document is left unchanged.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;job&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;The job id from `command_run` / `jobs_list` (omit to cancel every running job).&quot;,
+        &quot;format&quot;: &quot;uint64&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Jobs cancel&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-25">jobs_list</h3>
+<p>List background jobs: running ones with progress (0-1), message and elapsed time, then the last few that ended (state done|failed|cancelled with their result or error). Finished jobs are applied first.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {},
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Jobs list&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-26">render_preview</h3>
+<p>Render a bounded flattened PNG preview (bridge mode: app window screenshot).</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Headless mode only: document index (default: the active document).\nBridge previews capture the app window and reject `index`.&quot;,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;max_side&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Longest side of a headless preview (default 1024, maximum 2048).\nZero requests full size within that ceiling. Bridge mode returns the window screenshot.&quot;,
+        &quot;format&quot;: &quot;uint32&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Render preview&quot;,
+    &quot;readOnlyHint&quot;: true,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: true,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-27">session_list</h3>
+<p>List open documents (index, name, size, dirty) and the active index.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {},
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Session list&quot;,
+    &quot;readOnlyHint&quot;: true,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: true,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-28">ui_inspect</h3>
+<p>Bridge mode: full UI state of the live app (tool, panels, views, dialogs, windows). For the menu tree, call <code>control_call</code> with method <code>ui.menu.list</code>.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {},
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Ui inspect&quot;,
+    &quot;readOnlyHint&quot;: true,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: true,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-29">ui_menu_invoke</h3>
+<p>Bridge mode: activate a menu item by id.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;id&quot;: {
+        &quot;description&quot;: &quot;Menu item / command id.&quot;,
+        &quot;type&quot;: &quot;string&quot;
+      }
+    },
+    &quot;required&quot;: [
+      &quot;id&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Ui menu invoke&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-30">ui_pointer</h3>
+<p>Bridge mode: send pointer events (document coordinates) to the active tool; with a Color Picker open they sample the image into it instead.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;button&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Mouse button: `left` (default), or `right` / `secondary`: with the Move tool or\n`{\&quot;command\&quot;:true}` it opens the canvas layer menu, with a painting tool the Brush Preset\npicker.&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;events&quot;: {
+        &quot;description&quot;: &quot;Events in document coordinates: `[{\&quot;kind\&quot;:\&quot;down|move|up\&quot;,\&quot;x\&quot;:..,\&quot;y\&quot;:..,\&quot;pressure\&quot;:..}]`.&quot;,
+        &quot;items&quot;: {
+          &quot;description&quot;: &quot;One `ui_pointer` event, for the tool schema only: events are forwarded to `ui.pointer` as JSON.&quot;,
+          &quot;properties&quot;: {
+            &quot;kind&quot;: {
+              &quot;anyOf&quot;: [
+                {
+                  &quot;enum&quot;: [
+                    &quot;down&quot;,
+                    &quot;move&quot;,
+                    &quot;up&quot;
+                  ],
+                  &quot;type&quot;: &quot;string&quot;
+                },
+                {
+                  &quot;type&quot;: &quot;null&quot;
+                }
+              ],
+              &quot;description&quot;: &quot;`down`, `move` (default) or `up`.&quot;
+            },
+            &quot;pressure&quot;: {
+              &quot;description&quot;: &quot;Pen pressure 0..1 (default 1).&quot;,
+              &quot;format&quot;: &quot;double&quot;,
+              &quot;type&quot;: [
+                &quot;number&quot;,
+                &quot;null&quot;
+              ]
+            },
+            &quot;rotation&quot;: {
+              &quot;description&quot;: &quot;A simulated pen's barrel rotation.&quot;,
+              &quot;format&quot;: &quot;double&quot;,
+              &quot;type&quot;: [
+                &quot;number&quot;,
+                &quot;null&quot;
+              ]
+            },
+            &quot;tiltX&quot;: {
+              &quot;description&quot;: &quot;A simulated pen's tilt, as a stylus reports it.&quot;,
+              &quot;format&quot;: &quot;double&quot;,
+              &quot;type&quot;: [
+                &quot;number&quot;,
+                &quot;null&quot;
+              ]
+            },
+            &quot;tiltY&quot;: {
+              &quot;format&quot;: &quot;double&quot;,
+              &quot;type&quot;: [
+                &quot;number&quot;,
+                &quot;null&quot;
+              ]
+            },
+            &quot;x&quot;: {
+              &quot;description&quot;: &quot;Document x in pixels.&quot;,
+              &quot;format&quot;: &quot;double&quot;,
+              &quot;type&quot;: &quot;number&quot;
+            },
+            &quot;y&quot;: {
+              &quot;description&quot;: &quot;Document y in pixels.&quot;,
+              &quot;format&quot;: &quot;double&quot;,
+              &quot;type&quot;: &quot;number&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;x&quot;,
+            &quot;y&quot;
+          ],
+          &quot;type&quot;: &quot;object&quot;
+        },
+        &quot;type&quot;: &quot;array&quot;
+      },
+      &quot;modifiers&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Modifier keys, e.g. `{\&quot;shift\&quot;:true}` (also `alt`, `command`, `ctrl`, `space`).&quot;
+      }
+    },
+    &quot;required&quot;: [
+      &quot;events&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Ui pointer&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-31">ui_screenshot</h3>
+<p>Bridge mode: screenshot of the live app window as PNG.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;max_side&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Downscale the window screenshot to this longest side (maximum 2048).\nOmit or pass zero to keep the original size.&quot;,
+        &quot;format&quot;: &quot;uint32&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Ui screenshot&quot;,
+    &quot;readOnlyHint&quot;: true,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: true,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="zh-section-32">ui_set</h3>
+<p>Bridge mode: change UI state (tool, panels, dock, zoom, center, fit, theme, brush settings; see <code>fields</code>). Unknown fields are an error.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;fields&quot;: {
+        &quot;description&quot;: &quot;Fields for the control method `ui.set`: tool, panels, dock, dockTabs, dockWidth, colorPanel\n({background: bool} picks which swatch the Color panel edits), maskTarget,\nvectorMaskTarget, selectionMode, zoom, center, rotation (view angle in degrees), fit, theme (pro, proMedium, studio,\nstudioLight, classic, solarizedDark, adwaita, adwaitaDark, breezeLight, breezeDark, softLight, softDark), brushSection, brushTab,\nbrushesView, brushPicker ([x, y] opens the Brush Preset picker there, null closes it),\nbrushPickerName, brushPickerStroke, brushPickerTip (the picker card's parts, at least one\non), brushPickerScale (the picker footer's card-scale slider, 0.15 to 2, 1 the standard),\nbrushSize, gradientBlendMode\n(a blend mode name, for the Gradient tool), gradientClassic (bool), eyedropperSampleSize\n(\&quot;point\&quot; or 1, 3, 5, 11, 31, 51, 101), eyedropperSample (current, currentAndBelow, all,\nallNoAdjustments, currentAndBelowNoAdjustments), eyedropperRing (bool), cropOverlay (thirds,\ngrid, diagonal, triangle, goldenRatio, goldenSpiral), cropOverlayShow (auto, always, never),\ncropOverlayOrientation (0..3), cropShield (an object patching show_cropped_area, enabled,\ncolor (\&quot;matchCanvas\&quot; or \&quot;custom\&quot;), custom_color ([r, g, b]), opacity (0..100),\nauto_adjust, classic_mode and auto_center_preview), cropFill (background or contentAware,\nthe Crop tool's Fill), shapeStroke (an object patching width, align, cap, join, miterLimit,\ndashes, dashOffset and opacity; null disables the stroke). Shape stroke fields use\n`shape.edit` names and units; colour comes from `tools.setColors`. camTransformOnDrop (bool,\nthe Content-Aware Move tool's Transform On Drop). tileGrid (bool, a developer overlay of the\nactive layer's storage tiles). layerFilter (an object patching by (\&quot;kind\&quot;, \&quot;name\&quot; or\n\&quot;mode\&quot;), kinds (a list of layer kinds), name (matches part of the layer name) and mode (a\nblend mode name) for the Layers panel filter). strokeTrace (true, false, \&quot;stderr\&quot; or \&quot;off\&quot;:\nthe stroke latency trace at runtime; a CSV file is set at launch with --stroke-trace, not\nover this channel). Other fields are an error.&quot;
+      }
+    },
+    &quot;required&quot;: [
+      &quot;fields&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Ui set&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+</article><article id="en-doc" lang="en"><details open><summary>Quick navigation</summary><a href="#en-section-1">Addresses and protocols</a> · <a href="#en-section-2">Identity, permissions and Keys</a> · <a href="#en-section-3">Complete file-bridge fields</a> · <a href="#en-section-4">MCP initialization, discovery and sessions</a> · <a href="#en-section-5">Commands, jobs, cancellation and results</a> · <a href="#en-section-6">Desktop control protocol</a> · <a href="#en-section-7">Native MCP inputs</a> · <a href="#en-section-8">command_batch</a> · <a href="#en-section-9">command_list</a> · <a href="#en-section-10">command_run</a> · <a href="#en-section-11">control_call</a> · <a href="#en-section-12">doc_close</a> · <a href="#en-section-13">doc_export</a> · <a href="#en-section-14">doc_export_data_sets</a> · <a href="#en-section-15">doc_export_layers</a> · <a href="#en-section-16">doc_import_data_sets</a> · <a href="#en-section-17">doc_inspect</a> · <a href="#en-section-18">doc_new</a> · <a href="#en-section-19">doc_open</a> · <a href="#en-section-20">doc_place</a> · <a href="#en-section-21">doc_render_preview</a> · <a href="#en-section-22">doc_save</a> · <a href="#en-section-23">doc_select</a> · <a href="#en-section-24">jobs_cancel</a> · <a href="#en-section-25">jobs_list</a> · <a href="#en-section-26">render_preview</a> · <a href="#en-section-27">session_list</a> · <a href="#en-section-28">ui_inspect</a> · <a href="#en-section-29">ui_menu_invoke</a> · <a href="#en-section-30">ui_pointer</a> · <a href="#en-section-31">ui_screenshot</a> · <a href="#en-section-32">ui_set</a></details><h1>PhotoCraft VOS API</h1>
+<h2 id="en-section-1">Addresses and protocols</h2>
+<p>VOS prefix: <code>/app/com.ictrek.photocraft</code>; container: <code>http://photocraft-web:8080</code>. No independent host port is published. Nginx forwards <code>/storage/*</code> to Rust on internal8081; external callers use the frontend <code>/storage/*</code> route. The sidebar API guide provides both languages and quick navigation.</p>
+<p>The file bridge is HTTP, <code>/storage/mcp</code> is Streamable HTTP MCP, and standalone desktop <code>127.0.0.1:&lt;control-port&gt;</code> is line-delimited JSON over TCP. These are separate protocols.</p>
+<h2 id="en-section-2">Identity, permissions and Keys</h2>
+<p>Each HTTP/MCP request sends <code>Authorization: Bearer $VOS_TOKEN</code>. VOS userinfo verifies the user; successful verdicts are briefly cached (default60seconds). Application-context/admin-app tokens are not person identities and are refused. A Mcp-Session-Id routes requests but does not authenticate them. No personal API Key create/update/list API exists. Scheduler/provider Keys cannot replace a VOS-user token.</p>
+<p>Access is limited to platform-granted public directories and the user's own users/USERNAME/data. Scaffolding, another user's directories and escaping symlinks remain inaccessible. Model visibility/Keys, node registration and compute budgets belong to V-Scheduler, not this file bridge.</p>
+<h2 id="en-section-3">Complete file-bridge fields</h2>
+<p>JSON successes guarantee code=0 and data; do not require a msg field to be present.</p>
+<ul>
+<li>GET <code>/storage/volumes</code>:200 <code>{code:0,data:{total,data:[{uuid,name,adapter}]}}</code>. The x_HASH adapter is an authorized-root ID, not an absolute path. Use the returned adapter in later requests.</li>
+<li>GET <code>/storage/index?adapter=ID&amp;path=/RELATIVE_DIR</code>:200 <code>{code:0,data:{files:[{type,path,basename,extension,file_size,storage}]}}</code>. Type is dir/file, file_size is bytes and storage is the adapter. Entries are basename-sorted; dotfiles are hidden. No pagination:10000entries trigger rejection requesting a smaller directory, not silent truncation.</li>
+<li>GET <code>/storage/download?adapter=ID&amp;path=/RELATIVE_FILE</code>: application/octet-stream bytes, not a JSON envelope. Default maximum256MiB; oversize413. An adapter never bypasses file/path authorization.</li>
+<li>POST <code>/storage/upload?adapter=ID&amp;path=/RELATIVE_DIR&amp;name=FILENAME</code>: raw bytes, not multipart/JSON;200 <code>{code:0,data:&quot;saved&quot;}</code>. Default256MiB body limits apply in nginx and Rust. A neighboring temporary file is synced then atomically replaces the target. <strong>Existing same-name files are overwritten</strong>; failures remove the temporary file.</li>
+<li>POST <code>/storage/new_folder</code>: application/json <code>{adapter:string,path:string,name:string}</code>;200 <code>{code:0,data:&quot;created&quot;}</code>. Creates one directory rather than recursive mkdir; name must be a valid single filename.</li>
+<li>POST <code>/storage/album/session</code>: application/json <code>{origin:&quot;https://VOS_HOST:PORT&quot;}</code> with the current user's Bearer. Origin must match Host, contain no path/query/fragment, and HTTP origins are upgraded to the platform's external HTTPS port. Success returns the native AI Album session (including accessToken). This is a sensitive user credential, not a long-lived PhotoCraft Key to print/store as one. Unavailable/invalid Album502, authentication failure401.</li>
+</ul>
+<p>Do not invent rename/delete/personal-Key HTTP endpoints. Framework parameter/JSON extraction errors can be native400/422 text rather than the business JSON envelope.</p>
+<pre><code class="language-bash">BASE=http://photocraft-web:8080
+curl &quot;$BASE/storage/volumes&quot; -H &quot;Authorization: Bearer $VOS_TOKEN&quot;
+# Set ADAPTER from the previous response; URL-encode paths and filenames.
+curl --get &quot;$BASE/storage/index&quot; -H &quot;Authorization: Bearer $VOS_TOKEN&quot; --data-urlencode &quot;adapter=$ADAPTER&quot; --data-urlencode 'path=/'
+curl --get &quot;$BASE/storage/download&quot; -H &quot;Authorization: Bearer $VOS_TOKEN&quot; --data-urlencode &quot;adapter=$ADAPTER&quot; --data-urlencode 'path=/example.png' --output example.png
+</code></pre>
+<h2 id="en-section-4">MCP initialization, discovery and sessions</h2>
+<p>POST/GET/DELETE <code>/storage/mcp</code> use MCP JSON-RPC2.0 with JSON/SSE. Every request still carries VOS Bearer. Initialize, retain the returned Mcp-Session-Id, send notifications/initialized, then call tools/list or tools/call with the session header. An SDK handles SSE and version negotiation.</p>
+<pre><code class="language-bash">MCP=http://photocraft-web:8080/storage/mcp
+curl -i &quot;$MCP&quot; -H &quot;Authorization: Bearer $VOS_TOKEN&quot; -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:1,&quot;method&quot;:&quot;initialize&quot;,&quot;params&quot;:{&quot;protocolVersion&quot;:&quot;2025-03-26&quot;,&quot;capabilities&quot;:{},&quot;clientInfo&quot;:{&quot;name&quot;:&quot;example-agent&quot;,&quot;version&quot;:&quot;1.0&quot;}}}'
+# Save the returned session header as MCP_SESSION; use the negotiated version.
+curl &quot;$MCP&quot; -H &quot;Authorization: Bearer $VOS_TOKEN&quot; -H &quot;Mcp-Session-Id: $MCP_SESSION&quot; -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;method&quot;:&quot;notifications/initialized&quot;}'
+curl &quot;$MCP&quot; -H &quot;Authorization: Bearer $VOS_TOKEN&quot; -H &quot;Mcp-Session-Id: $MCP_SESSION&quot; -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:2,&quot;method&quot;:&quot;tools/list&quot;,&quot;params&quot;:{}}'
+curl &quot;$MCP&quot; -H &quot;Authorization: Bearer $VOS_TOKEN&quot; -H &quot;Mcp-Session-Id: $MCP_SESSION&quot; -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{&quot;jsonrpc&quot;:&quot;2.0&quot;,&quot;id&quot;:3,&quot;method&quot;:&quot;tools/call&quot;,&quot;params&quot;:{&quot;name&quot;:&quot;session_list&quot;,&quot;arguments&quot;:{}}}'
+</code></pre>
+<p>VOS uses per-user headless documents. The browser canvas and MCP memory are not automatically the same document. Keep the MCP session when editing and explicitly doc_save/doc_export. Defaults:8resident users,30-minute idle reclamation; all workspaces in use yields429. Unsaved memory is not durable across restart/reclamation.</p>
+<p>Continuous in-memory edits need a session-capable protocol, such as the verified2025-03-26. Rmcp handles2026-07-28 statelessly, so document state cannot be assumed to survive calls under that version. Save before closing. After session loss, reinitialize and inspect files rather than blindly replaying mutations.</p>
+<h2 id="en-section-5">Commands, jobs, cancellation and results</h2>
+<p>Tools/list returns25native tools and their inputSchema. Start with session_list and doc_new/doc_open. Use command_list(filter/enabled_only) to discover IDs, parameter documentation and disabled reasons, then command_run. Never derive IDs from menu text. Command_batch is limited to256steps; each command has its own history step. Failure or budget exhaustion retains completed steps/results rather than rolling back the entire batch.</p>
+<p>Command_run defaults wait=true. With wait=false, long operations return <code>{job:id}</code>; poll jobs_list. Jobs_cancel takes an optional numeric job ID; <strong>omitting it cancels all running jobs</strong>. Supply the ID to stop one. Disconnecting HTTP/closing MCP is not a saved-document rollback. Timeouts/response-budget errors can occur after execution; inspect document/job state before retrying.</p>
+<p>Tool results primarily use MCP content text (JSON text), plus optional image/base64/mimeType content. Do not require structuredContent. Inspect isError and JSON-RPC error as well as HTTP status. Bridge-mode ui_* and control_call need a live desktop bridge and are not usable UI automation in VOS headless mode.</p>
+<p>Default MCP frame limit1MiB. Previews are bounded by2048side/5MiB PNG and responses by8MiB. Nginx's300-second read timeout is not execution admission; use background jobs for long work. Typical failures:401 identity,403 app token,404/400 unavailable path,400 invalid format/path,413 oversize,429 workspace capacity and502 identity/Album upstream. Rust business failures use <code>{code:10001|10007|10002,msg,data:null}</code> for unauthenticated/not-found/other errors; proxy/framework/MCP errors retain their own formats.</p>
+<h2 id="en-section-6">Desktop control protocol</h2>
+<p>Standalone desktop control uses a token file/PHOTOCRAFT_CONTROL_TOKEN_FILE. Authenticate first on each TCP connection, then send JSON lines <code>{id,method,params}</code>. Replies are <code>{id,ok,result}</code> or <code>{id,ok:false,error}</code>. The desktop token is not a VOS Key. At the 60-second deadline, <code>timeout: not run</code> is retryable; <code>timeout: no reply in 60s</code> may already have executed. Inspect state before replay. See the complete <a href="https://github.com/ictrektech/photocraft/blob/main/docs/control-protocol.md">desktop protocol</a> and <a href="https://github.com/ictrektech/photocraft/blob/main/crates/automation/src/server.rs">native Rust tools</a>.</p>
+<h2 id="en-section-7">Native MCP inputs</h2>
+<p>These schemas come from the executable native service. All25tool names and all22parameterized tools' root fields, including serde renames, match current Rust source. The live tools/list remains authoritative. Native field descriptions, required flags, nesting, enums and limits are retained.</p>
+<h3 id="en-section-8">command_batch</h3>
+<p>Run several engine commands in one call, in order (fewer round trips). Returns {completed, failed, results:[{ok, result|error}]}; stops at the first error unless stop_on_error is false. Not an atomic transaction: earlier successful steps stay applied (no rollback).</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;steps&quot;: {
+        &quot;description&quot;: &quot;Commands to run in order: `[{\&quot;id\&quot;: \&quot;layer.new.layer\&quot;, \&quot;params\&quot;: {\&quot;name\&quot;: \&quot;Ink\&quot;}}, …]`. A\nstep with `\&quot;wait\&quot;: false` starts a long command as a background job (its result is\n`{\&quot;job\&quot;: id}`, as in `command_run`); later steps that edit the same document fail until\nthe job ends.&quot;,
+        &quot;items&quot;: {
+          &quot;additionalProperties&quot;: false,
+          &quot;properties&quot;: {
+            &quot;id&quot;: {
+              &quot;description&quot;: &quot;Command id, e.g. `layer.new.layer`, `filter.blur.gaussianBlur`.&quot;,
+              &quot;type&quot;: &quot;string&quot;
+            },
+            &quot;params&quot;: {
+              &quot;default&quot;: null,
+              &quot;description&quot;: &quot;Command parameters as a JSON object (see the `params` doc in `command_list`).&quot;
+            },
+            &quot;wait&quot;: {
+              &quot;default&quot;: null,
+              &quot;description&quot;: &quot;Wait for a long command (filters, Content-Aware Fill, Photomerge, …) to finish (default\ntrue). With false it runs as a background job and the result is `{\&quot;job\&quot;: id}`: poll it\nwith `jobs_list`, stop it with `jobs_cancel`.&quot;,
+              &quot;type&quot;: [
+                &quot;boolean&quot;,
+                &quot;null&quot;
+              ]
+            }
+          },
+          &quot;required&quot;: [
+            &quot;id&quot;
+          ],
+          &quot;type&quot;: &quot;object&quot;
+        },
+        &quot;type&quot;: &quot;array&quot;
+      },
+      &quot;stop_on_error&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Stop at the first failing step (default true).&quot;,
+        &quot;type&quot;: [
+          &quot;boolean&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;required&quot;: [
+      &quot;steps&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Command batch&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-9">command_list</h3>
+<p>List engine commands. Returns a JSON array (no wrapper object) of {id, label, menu: [path], shortcut: string|null, params: doc string, enabled: bool, disabledReason: string|null, needsDocument: bool}. <code>disabledReason</code> says why a command is off (null when enabled); <code>needsDocument</code> is true when it is off because no document is open: create or open one first (doc_new, doc_open).</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;enabled_only&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Only commands that can run right now.&quot;,
+        &quot;type&quot;: [
+          &quot;boolean&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;filter&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Only commands whose id, label or keywords contain this text (case-insensitive).&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Command list&quot;,
+    &quot;readOnlyHint&quot;: true,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: true,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-10">command_run</h3>
+<p>Run an engine command by id with JSON params (see command_list). Returns the command's JSON result. Long commands (filters, Content-Aware Fill/Scale, Photomerge, brush import) wait to finish unless <code>wait</code> is false: then they run as a background job and the result is {job: id} (see jobs_list, jobs_cancel).</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;id&quot;: {
+        &quot;description&quot;: &quot;Command id, e.g. `layer.new.layer`, `filter.blur.gaussianBlur`.&quot;,
+        &quot;type&quot;: &quot;string&quot;
+      },
+      &quot;params&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Command parameters as a JSON object (see the `params` doc in `command_list`).&quot;
+      },
+      &quot;wait&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Wait for a long command (filters, Content-Aware Fill, Photomerge, …) to finish (default\ntrue). With false it runs as a background job and the result is `{\&quot;job\&quot;: id}`: poll it\nwith `jobs_list`, stop it with `jobs_cancel`.&quot;,
+        &quot;type&quot;: [
+          &quot;boolean&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;required&quot;: [
+      &quot;id&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Command run&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-11">control_call</h3>
+<p>Bridge mode: call any control-protocol method (docs/control-protocol.md) with raw params.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;method&quot;: {
+        &quot;description&quot;: &quot;Any control-protocol method, e.g. `ui.dialog.open`.&quot;,
+        &quot;type&quot;: &quot;string&quot;
+      },
+      &quot;params&quot;: {
+        &quot;default&quot;: null
+      }
+    },
+    &quot;required&quot;: [
+      &quot;method&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Control call&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-12">doc_close</h3>
+<p>Close a document (default: the active one) without saving.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Document index from `session_list` (default: the active document).&quot;,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc close&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-13">doc_export</h3>
+<p>Export the document to another format (same as doc_save with an explicit path/format).</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;dpxBits&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;DPX: 8, 10, 12 or 16 bits per sample. Unset: 8 for an 8-bit document, else 16.&quot;,
+        &quot;format&quot;: &quot;uint8&quot;,
+        &quot;maximum&quot;: 255,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;format&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Format override as an extension (pcraft, psd, png, jpg, tif, webp, exr, …).&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;path&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Target beneath the configured automation write root: relative (forward slashes) or absolute.\nThe extension selects the format. Omit to write back to the document's own file, which\nworks only for a PSD, PSB or .pcraft file kept in its own format; any other save needs\n`path`, so a flattened or converted copy never replaces the opened file.&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;quality&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;JPEG or WebP quality 1..100. A WebP saved with a quality is lossy; without one it is lossless.&quot;,
+        &quot;format&quot;: &quot;uint8&quot;,
+        &quot;maximum&quot;: 255,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;tgaBits&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;TGA: 24 or 32 bits per pixel. 32 writes the alpha channel (or else the transparency) as the\nalpha, 24 none. Unset: 32 with an alpha channel or transparency, else 24.&quot;,
+        &quot;format&quot;: &quot;uint8&quot;,
+        &quot;maximum&quot;: 255,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;tiffLayers&quot;: {
+        &quot;default&quot;: false,
+        &quot;description&quot;: &quot;TIFF: keep the layers (Photoshop layer data). Off by default: a flat TIFF.&quot;,
+        &quot;type&quot;: &quot;boolean&quot;
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc export&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-14">doc_export_data_sets</h3>
+<p>Export every data set of the document as its own flattened file beneath the write root (the capability-scoped Export Data Sets). The batch is planned first, so colliding filenames are refused before any file is written.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;data_sets&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Only these data sets, by name; default every one of them.&quot;,
+        &quot;items&quot;: {
+          &quot;type&quot;: &quot;string&quot;
+        },
+        &quot;type&quot;: [
+          &quot;array&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;dir&quot;: {
+        &quot;description&quot;: &quot;Directory beneath the configured automation write root: relative (forward slashes) or absolute.&quot;,
+        &quot;type&quot;: &quot;string&quot;
+      },
+      &quot;format&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Export format (default png).&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Document index from `session_list` (default: the active document).&quot;,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;naming&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Filename template with `{name}`, `{index}` and `{document}` (default `{name}`).&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;required&quot;: [
+      &quot;dir&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc export data sets&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-15">doc_export_layers</h3>
+<p>Export each exported layer of the document as its own file beneath the write root (the capability-scoped Layers to Files). A file that already exists is an error, not an overwrite.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;dir&quot;: {
+        &quot;description&quot;: &quot;Directory beneath the configured automation write root: relative (forward slashes) or absolute.&quot;,
+        &quot;type&quot;: &quot;string&quot;
+      },
+      &quot;format&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Export format (default png).&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Document index from `session_list` (default: the active document).&quot;,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;prefix&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Filename prefix (default: the document name).&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;quality&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Encoder quality, 0..12, for the formats that take one.&quot;,
+        &quot;format&quot;: &quot;double&quot;,
+        &quot;type&quot;: [
+          &quot;number&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;visible_only&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Export only the layers that are visible (default true).&quot;,
+        &quot;type&quot;: [
+          &quot;boolean&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;required&quot;: [
+      &quot;dir&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc export layers&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-16">doc_import_data_sets</h3>
+<p>Import a data set CSV from the read root into the document (the capability-scoped Import Variable Data Sets).</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;delimiter&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Field delimiter (default `,`).&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Document index from `session_list` (default: the active document).&quot;,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;path&quot;: {
+        &quot;description&quot;: &quot;Path beneath the configured automation read root: relative (forward slashes) or absolute.&quot;,
+        &quot;type&quot;: &quot;string&quot;
+      }
+    },
+    &quot;required&quot;: [
+      &quot;path&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc import data sets&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-17">doc_inspect</h3>
+<p>Document state as JSON: layer tree (top to bottom), history, selection, active layer.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Document index from `session_list` (default: the active document).&quot;,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc inspect&quot;,
+    &quot;readOnlyHint&quot;: true,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: true,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-18">doc_new</h3>
+<p>Create a new document (defaults: 1920x1080 RGB 8-bit white).</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;background&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;white | black | transparent | #rrggbb&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;depth&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;8 | 16 | 32&quot;,
+        &quot;format&quot;: &quot;uint32&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;height&quot;: {
+        &quot;default&quot;: null,
+        &quot;format&quot;: &quot;uint32&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;mode&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;rgb | gray | cmyk | lab&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;name&quot;: {
+        &quot;default&quot;: null,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;width&quot;: {
+        &quot;default&quot;: null,
+        &quot;format&quot;: &quot;uint32&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc new&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-19">doc_open</h3>
+<p>Open an image or document file and make it active. Returns index, size and import warnings.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;path&quot;: {
+        &quot;description&quot;: &quot;Path beneath the configured automation read root: relative (forward slashes) or absolute.&quot;,
+        &quot;type&quot;: &quot;string&quot;
+      }
+    },
+    &quot;required&quot;: [
+      &quot;path&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc open&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-20">doc_place</h3>
+<p>Place a file into the document as a Smart Object layer (Place Embedded), reading <code>path</code> beneath the read root. <code>scale</code> (percent), <code>fit</code> and <code>center</code> are the command's own.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;center&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Centre of the placed layer, in document pixels.&quot;,
+        &quot;items&quot;: {
+          &quot;format&quot;: &quot;double&quot;,
+          &quot;type&quot;: &quot;number&quot;
+        },
+        &quot;maxItems&quot;: 2,
+        &quot;minItems&quot;: 2,
+        &quot;type&quot;: [
+          &quot;array&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;fit&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Place at a centred size instead of a scaled one.&quot;,
+        &quot;type&quot;: [
+          &quot;boolean&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Document index from `session_list` (default: the active document).&quot;,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;path&quot;: {
+        &quot;description&quot;: &quot;Path beneath the configured automation read root: relative (forward slashes) or absolute.&quot;,
+        &quot;type&quot;: &quot;string&quot;
+      },
+      &quot;scale&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Scale as a percentage; defaults to fitting a file larger than the canvas.&quot;,
+        &quot;format&quot;: &quot;double&quot;,
+        &quot;type&quot;: [
+          &quot;number&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;required&quot;: [
+      &quot;path&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc place&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-21">doc_render_preview</h3>
+<p>Render the flattened document and return it as a PNG image (bridge mode: window screenshot).</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Headless mode only: document index (default: the active document).\nBridge previews capture the app window and reject `index`.&quot;,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;max_side&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Longest side of a headless preview (default 1024, maximum 2048).\nZero requests full size within that ceiling. Bridge mode returns the window screenshot.&quot;,
+        &quot;format&quot;: &quot;uint32&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc render preview&quot;,
+    &quot;readOnlyHint&quot;: true,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: true,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-22">doc_save</h3>
+<p>Save the document. <code>.pcraft</code> is the lossless native format (incremental); other extensions (psd, png, jpg, tif, webp, exr, …) export. Without <code>path</code> only a PSD, PSB or .pcraft document is written back to its own         file. Returns warnings about anything the format cannot hold.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;dpxBits&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;DPX: 8, 10, 12 or 16 bits per sample. Unset: 8 for an 8-bit document, else 16.&quot;,
+        &quot;format&quot;: &quot;uint8&quot;,
+        &quot;maximum&quot;: 255,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;format&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Format override as an extension (pcraft, psd, png, jpg, tif, webp, exr, …).&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;path&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Target beneath the configured automation write root: relative (forward slashes) or absolute.\nThe extension selects the format. Omit to write back to the document's own file, which\nworks only for a PSD, PSB or .pcraft file kept in its own format; any other save needs\n`path`, so a flattened or converted copy never replaces the opened file.&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;quality&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;JPEG or WebP quality 1..100. A WebP saved with a quality is lossy; without one it is lossless.&quot;,
+        &quot;format&quot;: &quot;uint8&quot;,
+        &quot;maximum&quot;: 255,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;tgaBits&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;TGA: 24 or 32 bits per pixel. 32 writes the alpha channel (or else the transparency) as the\nalpha, 24 none. Unset: 32 with an alpha channel or transparency, else 24.&quot;,
+        &quot;format&quot;: &quot;uint8&quot;,
+        &quot;maximum&quot;: 255,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;tiffLayers&quot;: {
+        &quot;default&quot;: false,
+        &quot;description&quot;: &quot;TIFF: keep the layers (Photoshop layer data). Off by default: a flat TIFF.&quot;,
+        &quot;type&quot;: &quot;boolean&quot;
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc save&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-23">doc_select</h3>
+<p>Make the document at <code>index</code> active.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;index&quot;: {
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: &quot;integer&quot;
+      }
+    },
+    &quot;required&quot;: [
+      &quot;index&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Doc select&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-24">jobs_cancel</h3>
+<p>Cancel a background job by id (or every running job when <code>job</code> is omitted). The document is left unchanged.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;job&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;The job id from `command_run` / `jobs_list` (omit to cancel every running job).&quot;,
+        &quot;format&quot;: &quot;uint64&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Jobs cancel&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-25">jobs_list</h3>
+<p>List background jobs: running ones with progress (0-1), message and elapsed time, then the last few that ended (state done|failed|cancelled with their result or error). Finished jobs are applied first.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {},
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Jobs list&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-26">render_preview</h3>
+<p>Render a bounded flattened PNG preview (bridge mode: app window screenshot).</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;index&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Headless mode only: document index (default: the active document).\nBridge previews capture the app window and reject `index`.&quot;,
+        &quot;format&quot;: &quot;uint&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;max_side&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Longest side of a headless preview (default 1024, maximum 2048).\nZero requests full size within that ceiling. Bridge mode returns the window screenshot.&quot;,
+        &quot;format&quot;: &quot;uint32&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Render preview&quot;,
+    &quot;readOnlyHint&quot;: true,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: true,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-27">session_list</h3>
+<p>List open documents (index, name, size, dirty) and the active index.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {},
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Session list&quot;,
+    &quot;readOnlyHint&quot;: true,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: true,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-28">ui_inspect</h3>
+<p>Bridge mode: full UI state of the live app (tool, panels, views, dialogs, windows). For the menu tree, call <code>control_call</code> with method <code>ui.menu.list</code>.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {},
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Ui inspect&quot;,
+    &quot;readOnlyHint&quot;: true,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: true,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-29">ui_menu_invoke</h3>
+<p>Bridge mode: activate a menu item by id.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;id&quot;: {
+        &quot;description&quot;: &quot;Menu item / command id.&quot;,
+        &quot;type&quot;: &quot;string&quot;
+      }
+    },
+    &quot;required&quot;: [
+      &quot;id&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Ui menu invoke&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-30">ui_pointer</h3>
+<p>Bridge mode: send pointer events (document coordinates) to the active tool; with a Color Picker open they sample the image into it instead.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;button&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Mouse button: `left` (default), or `right` / `secondary`: with the Move tool or\n`{\&quot;command\&quot;:true}` it opens the canvas layer menu, with a painting tool the Brush Preset\npicker.&quot;,
+        &quot;type&quot;: [
+          &quot;string&quot;,
+          &quot;null&quot;
+        ]
+      },
+      &quot;events&quot;: {
+        &quot;description&quot;: &quot;Events in document coordinates: `[{\&quot;kind\&quot;:\&quot;down|move|up\&quot;,\&quot;x\&quot;:..,\&quot;y\&quot;:..,\&quot;pressure\&quot;:..}]`.&quot;,
+        &quot;items&quot;: {
+          &quot;description&quot;: &quot;One `ui_pointer` event, for the tool schema only: events are forwarded to `ui.pointer` as JSON.&quot;,
+          &quot;properties&quot;: {
+            &quot;kind&quot;: {
+              &quot;anyOf&quot;: [
+                {
+                  &quot;enum&quot;: [
+                    &quot;down&quot;,
+                    &quot;move&quot;,
+                    &quot;up&quot;
+                  ],
+                  &quot;type&quot;: &quot;string&quot;
+                },
+                {
+                  &quot;type&quot;: &quot;null&quot;
+                }
+              ],
+              &quot;description&quot;: &quot;`down`, `move` (default) or `up`.&quot;
+            },
+            &quot;pressure&quot;: {
+              &quot;description&quot;: &quot;Pen pressure 0..1 (default 1).&quot;,
+              &quot;format&quot;: &quot;double&quot;,
+              &quot;type&quot;: [
+                &quot;number&quot;,
+                &quot;null&quot;
+              ]
+            },
+            &quot;rotation&quot;: {
+              &quot;description&quot;: &quot;A simulated pen's barrel rotation.&quot;,
+              &quot;format&quot;: &quot;double&quot;,
+              &quot;type&quot;: [
+                &quot;number&quot;,
+                &quot;null&quot;
+              ]
+            },
+            &quot;tiltX&quot;: {
+              &quot;description&quot;: &quot;A simulated pen's tilt, as a stylus reports it.&quot;,
+              &quot;format&quot;: &quot;double&quot;,
+              &quot;type&quot;: [
+                &quot;number&quot;,
+                &quot;null&quot;
+              ]
+            },
+            &quot;tiltY&quot;: {
+              &quot;format&quot;: &quot;double&quot;,
+              &quot;type&quot;: [
+                &quot;number&quot;,
+                &quot;null&quot;
+              ]
+            },
+            &quot;x&quot;: {
+              &quot;description&quot;: &quot;Document x in pixels.&quot;,
+              &quot;format&quot;: &quot;double&quot;,
+              &quot;type&quot;: &quot;number&quot;
+            },
+            &quot;y&quot;: {
+              &quot;description&quot;: &quot;Document y in pixels.&quot;,
+              &quot;format&quot;: &quot;double&quot;,
+              &quot;type&quot;: &quot;number&quot;
+            }
+          },
+          &quot;required&quot;: [
+            &quot;x&quot;,
+            &quot;y&quot;
+          ],
+          &quot;type&quot;: &quot;object&quot;
+        },
+        &quot;type&quot;: &quot;array&quot;
+      },
+      &quot;modifiers&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Modifier keys, e.g. `{\&quot;shift\&quot;:true}` (also `alt`, `command`, `ctrl`, `space`).&quot;
+      }
+    },
+    &quot;required&quot;: [
+      &quot;events&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Ui pointer&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-31">ui_screenshot</h3>
+<p>Bridge mode: screenshot of the live app window as PNG.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;max_side&quot;: {
+        &quot;default&quot;: null,
+        &quot;description&quot;: &quot;Downscale the window screenshot to this longest side (maximum 2048).\nOmit or pass zero to keep the original size.&quot;,
+        &quot;format&quot;: &quot;uint32&quot;,
+        &quot;minimum&quot;: 0,
+        &quot;type&quot;: [
+          &quot;integer&quot;,
+          &quot;null&quot;
+        ]
+      }
+    },
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Ui screenshot&quot;,
+    &quot;readOnlyHint&quot;: true,
+    &quot;destructiveHint&quot;: false,
+    &quot;idempotentHint&quot;: true,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+<h3 id="en-section-32">ui_set</h3>
+<p>Bridge mode: change UI state (tool, panels, dock, zoom, center, fit, theme, brush settings; see <code>fields</code>). Unknown fields are an error.</p>
+<pre><code class="language-json">{
+  &quot;inputSchema&quot;: {
+    &quot;$schema&quot;: &quot;https://json-schema.org/draft/2020-12/schema&quot;,
+    &quot;additionalProperties&quot;: false,
+    &quot;properties&quot;: {
+      &quot;fields&quot;: {
+        &quot;description&quot;: &quot;Fields for the control method `ui.set`: tool, panels, dock, dockTabs, dockWidth, colorPanel\n({background: bool} picks which swatch the Color panel edits), maskTarget,\nvectorMaskTarget, selectionMode, zoom, center, rotation (view angle in degrees), fit, theme (pro, proMedium, studio,\nstudioLight, classic, solarizedDark, adwaita, adwaitaDark, breezeLight, breezeDark, softLight, softDark), brushSection, brushTab,\nbrushesView, brushPicker ([x, y] opens the Brush Preset picker there, null closes it),\nbrushPickerName, brushPickerStroke, brushPickerTip (the picker card's parts, at least one\non), brushPickerScale (the picker footer's card-scale slider, 0.15 to 2, 1 the standard),\nbrushSize, gradientBlendMode\n(a blend mode name, for the Gradient tool), gradientClassic (bool), eyedropperSampleSize\n(\&quot;point\&quot; or 1, 3, 5, 11, 31, 51, 101), eyedropperSample (current, currentAndBelow, all,\nallNoAdjustments, currentAndBelowNoAdjustments), eyedropperRing (bool), cropOverlay (thirds,\ngrid, diagonal, triangle, goldenRatio, goldenSpiral), cropOverlayShow (auto, always, never),\ncropOverlayOrientation (0..3), cropShield (an object patching show_cropped_area, enabled,\ncolor (\&quot;matchCanvas\&quot; or \&quot;custom\&quot;), custom_color ([r, g, b]), opacity (0..100),\nauto_adjust, classic_mode and auto_center_preview), cropFill (background or contentAware,\nthe Crop tool's Fill), shapeStroke (an object patching width, align, cap, join, miterLimit,\ndashes, dashOffset and opacity; null disables the stroke). Shape stroke fields use\n`shape.edit` names and units; colour comes from `tools.setColors`. camTransformOnDrop (bool,\nthe Content-Aware Move tool's Transform On Drop). tileGrid (bool, a developer overlay of the\nactive layer's storage tiles). layerFilter (an object patching by (\&quot;kind\&quot;, \&quot;name\&quot; or\n\&quot;mode\&quot;), kinds (a list of layer kinds), name (matches part of the layer name) and mode (a\nblend mode name) for the Layers panel filter). strokeTrace (true, false, \&quot;stderr\&quot; or \&quot;off\&quot;:\nthe stroke latency trace at runtime; a CSV file is set at launch with --stroke-trace, not\nover this channel). Other fields are an error.&quot;
+      }
+    },
+    &quot;required&quot;: [
+      &quot;fields&quot;
+    ],
+    &quot;type&quot;: &quot;object&quot;
+  },
+  &quot;annotations&quot;: {
+    &quot;title&quot;: &quot;Ui set&quot;,
+    &quot;readOnlyHint&quot;: false,
+    &quot;destructiveHint&quot;: true,
+    &quot;idempotentHint&quot;: false,
+    &quot;openWorldHint&quot;: false
+  }
+}
+</code></pre>
+</article></main></html>

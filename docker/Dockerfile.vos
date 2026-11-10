@@ -100,6 +100,7 @@ COPY packaging/web/nginx.conf /etc/nginx/nginx.conf
 RUN sed -i '/listen \[::\]:8080;/d' /etc/nginx/nginx.conf
 COPY --from=builder /src/dist/web/ /usr/share/nginx/html/
 COPY LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md /usr/share/nginx/html/
+COPY ictrek.app/api-guide.html /usr/share/nginx/html/api-guide.html
 COPY assets/fonts/OFL-*.txt assets/icons/LICENSE-*.txt assets/dict/LICENSE-*.txt \
     crates/ui-egui/src/i18n/LICENSE-translations.txt /usr/share/nginx/html/licenses/
 EXPOSE 8080

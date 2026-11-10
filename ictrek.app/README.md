@@ -14,7 +14,7 @@ GitHub Release 与应用商店上传使用独立任务。GitHub 先公开 Releas
 同一镜像包含 WebAssembly 编辑器、nginx 和一个小型 Rust 授权目录服务。
 浏览器保留本机打开/下载，支持 VOS 数据访问授权目录和 AI 相册免二次登录选图。
 `VOS_APP_EXPOSED_PATH` 由平台注入，挂载到 `/exposed`；文件按平台授权读写。
-授权服务每次请求向 `VOS_OIDC_USERINFO_URL` 校验当前用户，不保存应用私有文件。
+授权服务每次请求核验用户身份，短期缓存 `VOS_OIDC_USERINFO_URL` 的成功结果，不保存应用私有文件。
 原相册图片保持不变，编辑副本可保存到本机或 VOS。
 
 ## 版本
@@ -65,3 +65,9 @@ ictrek.app/UPSTREAM.yml                    ← core / ref / fork_build（供 CI 
 保存和导出都可下载到本机或写入 VOS。PNG、JPEG、WebP 成品还可选择“导出成品图片到 AI 相册”。
 上传复用当前用户会话，核验相册中的图片记录后再提示成功；原图保留。
 PSD / PCraft 工程保存到本机或 VOS。异步保存失败会明确报错并恢复未保存状态，便于重试。
+
+## API 文档 / API reference
+
+VOS 侧栏 API 文档覆盖授权目录读写、VOS Bearer、相册会话、MCP会话/字段、任务取消及桌面协议差别。[中文](docs/api-reference.zh.md)、[English](docs/api-reference.en.md)。全部25项MCP工具输入随文档提供，实时 tools/list 仍为当前会话依据。文档是静态HTML，未增加JavaScript或其他运行时；随下次应用发版交付，本轮不发布镜像。
+
+The sidebar API guide covers authorized files, VOS Bearer, Album sessions, MCP fields/sessions, cancellation and desktop-protocol differences. All25 native tool schemas are included; live tools/list remains authoritative. This is static HTML with no added JavaScript/runtime and ships in the next app release. No image is published in this task.
