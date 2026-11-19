@@ -118,13 +118,13 @@ with tarfile.open(tarball, "r:gz") as tar:
         if not profiles <= compose_profiles:
             bad("compose has no services for profiles " + repr(sorted(profiles - compose_profiles)))
 
-        if routers.get("router-type") != "flatten":
-            bad("routers.yml must declare router-type: flatten for a single-entry app")
+        if routers.get("router-type") != "structured":
+            bad("routers.yml must group the home page and API documentation in the App Drawer")
         pages = routers.get("routers") or []
-        if len(pages) != 1 or pages[0].get("kind") != "page":
-            bad("routers.yml must be exactly one top-level page")
+        if len(pages) != 2 or any(page.get("kind") != "page" for page in pages):
+            bad("routers.yml must declare two top-level pages")
         else:
-            page = pages[0]
+            page, guide = pages
             if page.get("id") != page_id:
                 bad("routers.yml page id must be " + page_id)
             expected = "/app/" + app_id + "/?v=" + version
@@ -133,6 +133,10 @@ with tarfile.open(tarball, "r:gz") as tar:
             for flag in ("entry-point", "embed"):
                 if page.get(flag) is not True:
                     bad("routers.yml page must set " + flag + ": true")
+            if (guide.get("id") != "photocraft-api"
+                    or guide.get("iframe-src") != "/app/" + app_id + "/api-guide.html"
+                    or guide.get("embed") is not True or guide.get("entry-point")):
+                bad("routers.yml must declare an embedded API guide without a launch entry")
 
         for name, service in (compose.get("services") or {}).items():
             image = service.get("image", "")
