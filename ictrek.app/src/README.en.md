@@ -1,5 +1,7 @@
 # PhotoCraft
 
+In VOS, open **Application Management → App Drawer → PhotoCraft → API documentation**.
+
 PhotoCraft is an open-source, Photoshop-comparable native image editor: one Rust engine with
 several front ends. This app is the **browser build** — the same Rust code compiled to
 WebAssembly, running entirely in your browser with no server-side compute.

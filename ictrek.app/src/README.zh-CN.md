@@ -1,5 +1,7 @@
 # PhotoCraft
 
+在 VOS 的「应用管理 → 应用抽屉 → PhotoCraft」分组中打开「API 文档」。
+
 PhotoCraft 是一个开源的、对标 Photoshop 的原生图像编辑器，用 Rust 写成一个引擎加多个前端。
 本应用是它的**浏览器版本**：同一套 Rust 代码编译成 WebAssembly，在你的浏览器里跑，
 不需要服务器端算力。

@@ -1,9 +1,9 @@
 # =============================================================================
 # PhotoCraft — 前端导航路由
-# 平铺 page：单个入口直接进应用抽屉（与其他应用一致），无折叠分组。
+# VOS 应用抽屉按应用分组，主页与 API 文档为组内同级页面。
 # =============================================================================
 
-router-type: flatten
+router-type: structured
 
 routers:
   - id: photocraft
@@ -24,5 +24,4 @@ routers:
     order: 221
     iframe-src: /app/com.ictrek.photocraft/api-guide.html
     keep-alive: true
-    entry-point: true
     embed: true
